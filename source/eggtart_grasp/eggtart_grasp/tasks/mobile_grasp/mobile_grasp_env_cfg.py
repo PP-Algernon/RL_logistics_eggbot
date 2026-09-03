@@ -29,6 +29,7 @@ from eggtart_grasp.assets.eggtart import (
     EGGTART_ARM_JOINT_NAMES,
     EGGTART_BASE_FORWARD_AXIS,
     EGGTART_EE_GRASP_OFFSET,
+    EGGTART_EE_GRASP_DERECT_OFFSET,
     EGGTART_GRIPPER_JOINT_NAME,
     EGGTART_WHEEL_JOINT_BODY_REGEX,
     EGGTART_WHEEL_JOINT_NAMES,
@@ -43,7 +44,7 @@ LIFT_HEIGHT_THRESHOLD = 0.35  # m (目标质心高度)
 
 # 提起后必须保持在高度阈值以上这么久才算稳定抓取
 # 避免"瞬间碰到就给分"，要求真正夹住并保持
-LIFT_DWELL_TIME = 0.5  # s
+LIFT_DWELL_TIME = 0.3  # s
 
 # 目标移动速度范围（用于随机初始速度和周期性速度变化）
 TARGET_VELOCITY_RANGE = 0.10  # m/s (±range，降低到原来的40%)
@@ -211,9 +212,29 @@ class EventCfg:
             "asset_cfg": SceneEntityCfg("target"),
         },
     )
-    # 定期改变目标运动方向，使其成为真正的移动目标
-    # 注意：要实现"静止目标"版本，只需将此事件的 interval_range_s 设为很大的值，
-    # 或者在具体配置中覆盖 velocity_range 为 (0, 0)
+
+    # 逆向课程学习：三阶段目标行为
+    # 阶段 1 (iter 0-375, step 0-9000): 目标主动靠近末端方向点（辅助学习）
+    target_approach_stage1 = EventTerm(
+        func=mdp.target_approach_ee_direction,
+        mode="interval",
+        interval_range_s=(0.1, 0.2),  # 高频更新，实时跟踪末端
+        params={
+            "approach_speed": 0.05,  # 5 cm/s 缓慢靠近
+            "activation_distance": 0.1,  # 抓取点进入 10cm 内才触发
+            "stage1_end_step": 24000,  # 阶段1结束步数
+            "robot_cfg": SceneEntityCfg("robot"),
+            "target_cfg": SceneEntityCfg("target"),
+            "ee_cfg": SceneEntityCfg("robot", body_names="link_005"),
+            "grasp_offset": EGGTART_EE_GRASP_OFFSET,
+            "direction_offset": EGGTART_EE_GRASP_DERECT_OFFSET,
+        },
+    )
+
+    # 三阶段目标移动控制：
+    # - 阶段1 (step < 16000): 随机移动（配合 target_approach）
+    # - 阶段2 (16000 <= step < 24000): 静止
+    # - 阶段3 (step >= 24000): 恢复随机移动
     randomize_target_velocity = EventTerm(
         func=mdp.randomize_target_velocity,
         mode="interval",
@@ -223,6 +244,8 @@ class EventCfg:
                 "x": (-TARGET_VELOCITY_RANGE, TARGET_VELOCITY_RANGE),
                 "y": (-TARGET_VELOCITY_RANGE, TARGET_VELOCITY_RANGE),
             },
+            "stage2_start_step": 24000,   # 阶段2开始
+            "stage3_start_step": 36000,  # 阶段3开始
             "asset_cfg": SceneEntityCfg("target"),
         },
     )
@@ -240,7 +263,7 @@ class RewardsCfg:
     # arm_link1_cfg: 使用机械臂 link1 作为参考点，比底盘中心更能反映机械臂工作空间
     base_approach = RewTerm(
         func=mdp.base_to_target_xy_tanh,
-        weight=1.0,
+        weight=2.5,
         params={
             "std": 0.5,
             "standoff": 0.35,
@@ -265,19 +288,33 @@ class RewardsCfg:
         },
     )
     # 阶段 2: 末端执行器到达
+    #
     ee_reach = RewTerm(
         func=mdp.ee_to_target_tanh,
-        weight=2.5,
+        weight=2.0,  # 提高权重，让末端靠近成为主要目标
         params={
-            "std": 0.1,
+            "std": 0.1,  # 从 0.01 → 0.1 (10cm)：扩大感受野，远处也能感知梯度
             "ee_cfg": SceneEntityCfg("robot", body_names="link_005"),
             "target_cfg": SceneEntityCfg("target"),
             "grasp_offset": EGGTART_EE_GRASP_OFFSET,
         },
     )
+    # 夹爪朝向对准目标（夹持方向应该指向目标）
+    ee_orientation = RewTerm(
+        func=mdp.ee_grasp_direction_alignment,
+        weight=1.5,
+        params={
+            "std": 0.5,  # 角度容差约 30 度
+            "ee_cfg": SceneEntityCfg("robot", body_names="link_005"),
+            "target_cfg": SceneEntityCfg("target"),
+            "grasp_offset": EGGTART_EE_GRASP_OFFSET,
+            "grasp_direction_offset": EGGTART_EE_GRASP_DERECT_OFFSET,
+        },
+    )
+    # 末端执行器与目标之间的距离
     ee_distance = RewTerm(
         func=mdp.ee_to_target_distance_l2,
-        weight=-0.2,
+        weight=-1.0,  # 从 -1.0 → -3.0：加大惩罚，持续推动靠近
         params={
             "ee_cfg": SceneEntityCfg("robot", body_names="link_005"),
             "target_cfg": SceneEntityCfg("target"),
@@ -290,7 +327,6 @@ class RewardsCfg:
     # 早闭还能提高"某一帧恰好同时满足两条件"的概率，于是夹爪总是夹早了。
     # 计数器是 per-env 的，离开阈值立刻归零（要求连续，不是累计），
     # episode 重置时由 RewardManager 自动清零（类式奖励项才有这个能力）。
-
     # 引导惩罚：接近目标时不闭合夹爪会被惩罚（配合负权重）
     gripper_close_guide = RewTerm(
         func=mdp.gripper_close_when_near,
@@ -303,7 +339,6 @@ class RewardsCfg:
             "grasp_offset": EGGTART_EE_GRASP_OFFSET,
         },
     )
-
     # 主动惩罚"还没到位就闭爪"。
     # 只加停留计时是消极约束（拿不到分但也不亏），策略可能保持闭爪的习惯；
     # 这一项让提前闭爪真的要花钱，"张爪接近 -> 到位稳住 -> 再闭合"才最优。
@@ -319,11 +354,10 @@ class RewardsCfg:
             "grasp_offset": EGGTART_EE_GRASP_OFFSET,
         },
     )
-
     # 引导奖励：接近且闭合时鼓励提起末端（稠密奖励，完整动作序列）
     ee_lift_guide = RewTerm(
         func=mdp.ee_lift_when_near,
-        weight=5.0,  # 提高权重：让"提起"的吸引力 > "不闭合"的惩罚
+        weight=7.0,  # 提高权重：让"提起"的吸引力 > "不闭合"的惩罚
         params={
             "reach_threshold": GRASP_REACH_THRESHOLD,
             "gripper_closed_threshold": GRIPPER_CLOSED_THRESHOLD,
@@ -334,12 +368,11 @@ class RewardsCfg:
             "grasp_offset": EGGTART_EE_GRASP_OFFSET,
         },
     )
-
     # 稀疏抓取奖励（基于提起高度判定，不再依赖夹爪角度）
     # 目标必须被提起到指定高度并保持一段时间才算成功抓取
     grasp = RewTerm(
         func=mdp.grasp_bonus_lift,
-        weight=10.0,  # 提高权重，因为这是真正的任务目标
+        weight=15.0,  # 提高权重，因为这是真正的任务目标
         params={
             "lift_height_threshold": LIFT_HEIGHT_THRESHOLD,
             "lift_dwell_time": LIFT_DWELL_TIME,
@@ -359,6 +392,16 @@ class RewardsCfg:
         },
     )
     # 惩罚项
+    # 机械臂舒适度：鼓励关节保持接近 nominal 姿态
+    # 全程开启，引导底盘停在"让机械臂舒服工作"的位置，避免为了缩短末端距离而让机械臂扭曲
+    arm_comfort = RewTerm(
+        func=mdp.arm_comfort,
+        weight=1.0,  # 正奖励，越接近 nominal 越高
+        params={
+            "std": 1.0,  # 偏离 1 rad（57°）时奖励降到 0.6
+            "arm_cfg": SceneEntityCfg("robot", joint_names=EGGTART_ARM_JOINT_NAMES),
+        },
+    )
     # action_rate 权重从 -0.001 提到 -0.02。
     # 实测（恒定动作跑 200 步）关节位置峰峰值只有 ~1e-6 rad，物理侧完全干净，
     # 所以抖动是**策略在输出 bang-bang 动作**，不是仿真数值问题。
@@ -389,7 +432,7 @@ class RewardsCfg:
     # 只作用在机械臂 + 夹爪上：四个轮子关节是 continuous（URDF 里没有 limit），无极限可言。
     joint_limits = RewTerm(
         func=mdp.joint_pos_limits,
-        weight=-0.5,
+        weight=-1.0,  # 从 -0.5 提高到 -1.0，让机械臂更怕压限位
         params={
             "asset_cfg": SceneEntityCfg(
                 "robot", joint_names=EGGTART_ARM_JOINT_NAMES + [EGGTART_GRIPPER_JOINT_NAME]
@@ -429,9 +472,10 @@ class CurriculumCfg:
     时间表用 ``common_step_counter``（每次 env.step 加 1，与 num_envs 无关）计时。
     本项目 num_steps_per_env = 24，所以 step = 迭代数 × 24：
 
-        阶段 1 (iter 0-500,    step 0-12000)  : 只学底盘接近 + 朝向
-        阶段 2 (iter 500-1000, step 12000-24000): 加入末端执行器到达
-        阶段 3 (iter 1000+,    step 24000+)   : 完整任务（抓取 + 回收）
+        阶段 1 (iter 0-1000,   step 0-24000)  : 只学底盘接近 + 朝向（让底盘导航习惯固化）
+        阶段 2 (iter 1000-1500, step 24000-36000): 加入末端执行器到达（底盘+机械臂协同）
+        阶段 3 (iter 1500-2000, step 36000-48000): 完整任务（抓取 + 提起）
+        阶段 4 (iter 2000+,     step 48000+)    : 加入回收奖励
 
     上面 RewardsCfg 里写的权重是**最终阶段**的值，课程会在前期把还没到的阶段压成 0。
     改 num_steps_per_env 要同步改这里的阈值。
@@ -441,54 +485,67 @@ class CurriculumCfg:
     # 底盘两项全程开启，是后面所有阶段的基础
     base_approach_sched = CurrTerm(
         func=mdp.reward_weight_schedule,
-        params={"term_name": "base_approach", "schedule": [(0, 1.0)]},
+        params={"term_name": "base_approach", "schedule": [(0, 2.5)]},
     )
     base_facing_sched = CurrTerm(
         func=mdp.reward_weight_schedule,
         params={"term_name": "base_facing", "schedule": [(0, 1.2)]},
     )
-    # 末端执行器：阶段 2 打开
+    # 末端执行器：阶段 2 打开（延长到 24000 步，让底盘先学稳 1000 迭代）
     ee_reach_sched = CurrTerm(
         func=mdp.reward_weight_schedule,
-        params={"term_name": "ee_reach", "schedule": [(0, 0.0), (9000, 3.0)]},
+        params={"term_name": "ee_reach", "schedule": [(0, 0.0), (24000, 3.0)]},  # 6000→24000, 2.0→3.0
     )
     ee_distance_sched = CurrTerm(
         func=mdp.reward_weight_schedule,
-        params={"term_name": "ee_distance", "schedule": [(0, 0.0), (9000, -0.5)]},
+        params={"term_name": "ee_distance", "schedule": [(0, 0.0), (24000, -0.3)]},  # 6000→24000, -1.0→-0.3
     )
-    # 抓取：阶段 3 打开
-    # 引导
-    gripper_close_guide_sched = CurrTerm(
+    ee_orientation_sched = CurrTerm(
         func=mdp.reward_weight_schedule,
-        params={"term_name": "gripper_close_guide", "schedule": [(0, 0.0), (16000, -1.5)]},
-    )
-    ee_lift_guide_sched = CurrTerm(
-        func=mdp.reward_weight_schedule,
-        params={"term_name": "ee_lift_guide", "schedule": [(0, 0.0), (16000, 5.0)]},
-    )
-    # "提前闭爪"的惩罚和 grasp 同步打开，但权重降低避免过度抑制
-    gripper_early_sched = CurrTerm(
-        func=mdp.reward_weight_schedule,
-        params={"term_name": "gripper_early", "schedule": [(0, 0.0), (16000, -0.5)]},
-    )
-    # 使用基于提起高度的判定
-    grasp_sched = CurrTerm(
-        func=mdp.reward_weight_schedule,
-        params={"term_name": "grasp", "schedule": [(0, 0.0), (16000, 10.0)]},
-    )
-    
-    # 
-    retract_sched = CurrTerm(
-        func=mdp.reward_weight_schedule,
-        params={"term_name": "retract", "schedule": [(0, 0.0), (24000, 2.0)]},
+        params={"term_name": "ee_orientation", "schedule": [(0, 0.0), (24000, 1.5)]},  # 6000→24000
     )
 
-    # 
+    # 抓取：阶段 3 打开（36000 步 = 1500 迭代后，确保底盘+末端协同已稳定）
+    # 引导惩罚项，用于引导夹爪正确闭合
+    gripper_close_guide_sched = CurrTerm(
+        func=mdp.reward_weight_schedule,
+        params={"term_name": "gripper_close_guide", "schedule": [(0, 0.0), (36000, -1.5)]},  # 24000→36000
+    )
+    # "提前闭爪"的惩罚，但权重降低避免过度抑制
+    gripper_early_sched = CurrTerm(
+        func=mdp.reward_weight_schedule,
+        params={"term_name": "gripper_early", "schedule": [(0, 0.0), (36000, -0.5)]},  # 24000→36000
+    )
+    # 引导奖励：接近且闭合时鼓励提起末端（稠密奖励，完整动作序列）
+    ee_lift_guide_sched = CurrTerm(
+        func=mdp.reward_weight_schedule,
+        params={"term_name": "ee_lift_guide", "schedule": [(0, 0.0), (36000, 7.0)]},  # 24000→36000
+    )
+    # 稀疏抓取奖励：基于提起高度判定
+    grasp_sched = CurrTerm(
+        func=mdp.reward_weight_schedule,
+        params={"term_name": "grasp", "schedule": [(0, 0.0), (36000, 15.0)]},  # 24000→36000
+    )
+
+    #
+    # 回收奖励：用于鼓励机器人将物体收回至指定位置
+    retract_sched = CurrTerm(
+        func=mdp.reward_weight_schedule,
+        params={"term_name": "retract", "schedule": [(0, 0.0), (48000, 2.0)]},  # 30000→48000
+    )
+
+    # 机械臂舒适度：全程开启，从一开始就引导底盘停在让机械臂舒服的位置
+    arm_comfort_sched = CurrTerm(
+        func=mdp.reward_weight_schedule,
+        params={"term_name": "arm_comfort", "schedule": [(0, 1.0)]},
+    )
+
     # 关节限位惩罚全程开启：从一开始就不该往限位上顶
     joint_limits_sched = CurrTerm(
         func=mdp.reward_weight_schedule,
-        params={"term_name": "joint_limits", "schedule": [(0, -0.5)]},
+        params={"term_name": "joint_limits", "schedule": [(0, -1.0)]},  # -0.5→-1.0
     )
+    
     # 底盘速度惩罚： 一开始底盘还不会走，就罚它动会拖慢学习；等它大致学会接近了再要求"停住"。
     base_vel_sched = CurrTerm(
         func=mdp.reward_weight_schedule,

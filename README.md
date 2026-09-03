@@ -2,8 +2,7 @@
 
 Mecanum 轮移动底盘 + 5 轴机械臂的**移动抓取**强化学习项目，基于 [Isaac Lab](https://isaac-sim.github.io/IsaacLab/) 与 RSL-RL (PPO)。
 任务：机器人整体协同控制（底盘 + 机械臂），追踪并抓取一个**运动的目标物体**，抓取后将机械臂收回。
-
-> 本工程结构参考 `guguji_simulation/guguji_isaaclab`，作为外部扩展（external extension）接入 Isaac Lab。
+作为外部扩展（external extension）接入 Isaac Lab。
 
 ## 目录结构
 

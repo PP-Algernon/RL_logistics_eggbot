@@ -32,6 +32,14 @@ parser.add_argument("--grasp_close_time", type=float, default=0.3, help="脚本�
 parser.add_argument("--grasp_hold_time", type=float, default=0.4, help="闭合后保持的时间（秒）。")
 parser.add_argument("--grasp_retract_time", type=float, default=1.0, help="收回（臂回 nominal 姿态）的时间（秒）。")
 parser.add_argument("--quiet_grasp", action="store_true", default=False, help="不打印脚本接管的状态切换。")
+# --- 逆课程学习阶段选择（回放用）---
+parser.add_argument(
+    "--curriculum_stage",
+    type=int,
+    default=None,
+    choices=[1, 2, 3],
+    help="手动指定逆课程学习阶段（1=目标主动靠近, 2=目标静止, 3=目标随机移动）。不指定则使用训练时的自动切换逻辑。",
+)
 # append RSL-RL cli arguments
 cli_args.add_rsl_rl_args(parser)
 # append AppLauncher cli args
@@ -96,6 +104,29 @@ def main():
 
     # create isaac environment
     env = gym.make(args_cli.task, cfg=env_cfg, render_mode="rgb_array" if args_cli.video else None)
+
+    # 手动覆盖逆课程学习阶段（用于回放观察不同阶段的行为）
+    if args_cli.curriculum_stage is not None:
+        stage = args_cli.curriculum_stage
+        print(f"[INFO] 手动设置逆课程学习阶段: {stage}")
+
+        # 映射阶段到 common_step_counter（模拟训练时的阶段切换逻辑）
+        # 阶段1: step < 24000,  阶段2: 24000 <= step < 36000,  阶段3: step >= 36000
+        if stage == 1:
+            env.unwrapped.common_step_counter = 0  # 阶段1开始
+            print("  → 目标会主动靠近末端方向点（当抓取点接近时）")
+        elif stage == 2:
+            env.unwrapped.common_step_counter = 24000  # 阶段2开始
+            print("  → 目标保持静止")
+        elif stage == 3:
+            env.unwrapped.common_step_counter = 36000  # 阶段3开始
+            print("  → 目标恢复随机移动")
+
+        # 锁定 common_step_counter，防止在回放过程中自动递增导致阶段切换
+        # 注意：这需要环境支持，如果环境没有 _lock_step_counter 属性会失败
+        if hasattr(env.unwrapped, 'common_step_counter'):
+            # 保存原始值，每次 step 后恢复
+            _locked_step = env.unwrapped.common_step_counter
     # wrap for video recording
     if args_cli.video:
         video_kwargs = {
@@ -169,6 +200,10 @@ def main():
                 actions = grasp_override(actions)
             # env stepping
             obs, _, _, _ = env.step(actions)
+
+            # 锁定课程阶段：如果用户指定了阶段，每次 step 后恢复 common_step_counter
+            if args_cli.curriculum_stage is not None:
+                env.unwrapped.common_step_counter = _locked_step
 
             # episode_length_buf 变小 = 该 env 刚被重置，清掉它的脚本状态
             if grasp_override is not None:

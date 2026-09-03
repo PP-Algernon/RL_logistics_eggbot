@@ -405,6 +405,76 @@ def ee_to_target_distance_l2(
     """
     return _ee_to_target_distance(env, ee_cfg, target_cfg, grasp_offset, use_link5_com, link5_cfg)
 
+
+def ee_grasp_direction_alignment(
+    env: ManagerBasedRLEnv,
+    std: float,
+    ee_cfg: SceneEntityCfg = SceneEntityCfg("robot", body_names="link_005"),
+    target_cfg: SceneEntityCfg = SceneEntityCfg("target"),
+    grasp_offset: tuple[float, float, float] | None = None,
+    grasp_direction_offset: tuple[float, float, float] | None = None,
+) -> torch.Tensor:
+    """奖励夹爪朝向对准目标（夹持方向指向目标）
+
+    在 link5 坐标系下，抓取点（grasp_offset）到方向点（grasp_direction_offset）的向量
+    定义了夹爪的"夹持方向"。当这个方向对准目标时，获得最大奖励。
+
+    典型用法：
+        grasp_offset = EGGTART_EE_GRASP_OFFSET          # 夹持中心点
+        grasp_direction_offset = EGGTART_EE_GRASP_DERECT_OFFSET  # 方向参考点
+        两点连线方向 = 夹爪开口朝向（应该对准目标）
+
+    Args:
+        env: 环境实例
+        std: 角度误差的高斯核宽度（弧度）
+        ee_cfg: link5 实体配置
+        target_cfg: 目标物体实体配置
+        grasp_offset: 抓取点相对 link5 body 原点的偏移（局部系）
+        grasp_direction_offset: 方向参考点相对 link5 body 原点的偏移（局部系）
+
+    Returns:
+        shape (num_envs,)，范围 [0, 1]
+        - 夹持方向对准目标 -> 1.0
+        - 夹持方向垂直于目标 -> ~0.0
+    """
+    robot: Articulation = env.scene[ee_cfg.name]
+    target: RigidObject = env.scene[target_cfg.name]
+
+    if grasp_offset is None or grasp_direction_offset is None:
+        raise ValueError("grasp_offset and grasp_direction_offset are required")
+
+    # 计算抓取点和方向点在世界系下的位置
+    ee_pos_w = robot.data.body_pos_w[:, ee_cfg.body_ids[0]]
+    ee_quat_w = robot.data.body_quat_w[:, ee_cfg.body_ids[0]]
+
+    # 抓取点世界坐标
+    grasp_off = torch.tensor(grasp_offset, device=ee_pos_w.device, dtype=ee_pos_w.dtype)
+    grasp_off = grasp_off.unsqueeze(0).expand(ee_pos_w.shape[0], -1)
+    grasp_pos_w = ee_pos_w + quat_apply(ee_quat_w, grasp_off)
+
+    # 方向参考点世界坐标
+    dir_off = torch.tensor(grasp_direction_offset, device=ee_pos_w.device, dtype=ee_pos_w.dtype)
+    dir_off = dir_off.unsqueeze(0).expand(ee_pos_w.shape[0], -1)
+    dir_pos_w = ee_pos_w + quat_apply(ee_quat_w, dir_off)
+
+    # 夹持方向（单位向量）
+    grasp_dir = dir_pos_w - grasp_pos_w
+    grasp_dir = grasp_dir / (torch.norm(grasp_dir, dim=1, keepdim=True) + 1e-6)
+
+    # 目标方向（从抓取点指向目标）
+    to_target = target.data.root_pos_w - grasp_pos_w
+    to_target = to_target / (torch.norm(to_target, dim=1, keepdim=True) + 1e-6)
+
+    # 对齐度（点积）：1 = 完全对准，0 = 垂直，-1 = 反向
+    alignment = (grasp_dir * to_target).sum(dim=1)
+
+    # 转换为角度误差（弧度）
+    angle_error = torch.acos(torch.clamp(alignment, -1.0, 1.0))
+
+    # 高斯核奖励
+    return torch.exp(-torch.square(angle_error / std))
+
+
 class grasp_bonus_dwell(ManagerTermBase):
     """抓取奖励（带停留计时）：抓取点在阈值内**连续停留**足够久后，闭合夹爪才算有效
 
@@ -742,4 +812,56 @@ def retract_bonus_lift(
     error = torch.norm(joint_pos - joint_pos_default, dim=-1)
 
     reward = lifted * torch.exp(-0.5 * (error / std) ** 2)
+    return reward
+
+
+def arm_comfort(
+    env: ManagerBasedRLEnv,
+    arm_cfg: SceneEntityCfg,
+    std: float = 1.0,
+) -> torch.Tensor:
+    """机械臂舒适度奖励：鼓励机械臂保持接近 nominal 姿态
+
+    通过惩罚关节偏离默认位置，间接引导底盘停在"让机械臂舒服工作"的位置。
+    使用高斯核而非 L2 距离，避免远离 nominal 时惩罚线性增长（那样会和 ee_reach 对抗）。
+
+    **为什么需要这一项**：
+        当前奖励设计中，底盘和末端的目标可能冲突：
+        - `base_approach` 要求底盘停在 standoff 距离外
+        - `ee_reach` 要求末端尽可能靠近目标
+
+        如果 standoff 距离设置不当（太近或太远），策略会发现：
+        1. 底盘冲到目标旁边 → 末端能靠近 → ee_reach 高分
+        2. 但机械臂被迫扭曲到极限位置 → 实际上够不到
+
+        加入 `arm_comfort` 后，策略会权衡：
+        - 底盘停在让机械臂舒服伸展的位置（关节接近 nominal）
+        - 而不是为了缩短末端距离，把机械臂逼到极限
+
+    **与 `joint_pos_limits` 的区别**：
+        - `joint_pos_limits`：只惩罚超出软限位（行程最外 5%）的部分，中间区域不管
+        - `arm_comfort`：全程鼓励接近 nominal，越偏离越不舒服（但用高斯核平滑）
+
+        两者互补：`joint_pos_limits` 是硬约束（别压限位），`arm_comfort` 是软引导（别离太远）。
+
+    Args:
+        env: 环境实例
+        arm_cfg: 机械臂关节实体配置（不包括夹爪，夹爪需要开合）
+        std: 高斯核宽度（弧度），控制"多偏就算不舒服"。
+            std=1.0 时，偏离 1 rad（57°）奖励降到 0.6；
+            std=0.5 时更严格，偏离 0.5 rad（28°）就降到 0.6。
+
+    Returns:
+        shape (num_envs,) 的奖励张量，范围 [0, 1]，越接近 nominal 越高
+    """
+    robot: Articulation = env.scene[arm_cfg.name]
+
+    # 机械臂关节偏离 nominal 的距离（L2 范数）
+    arm_joint_ids = arm_cfg.joint_ids
+    joint_pos = robot.data.joint_pos[:, arm_joint_ids]  # (num_envs, N)
+    joint_pos_default = robot.data.default_joint_pos[:, arm_joint_ids]
+    error = torch.norm(joint_pos - joint_pos_default, dim=-1)
+
+    # 高斯核奖励：偏离 0 时为 1，偏离越大越小
+    reward = torch.exp(-0.5 * (error / std) ** 2)
     return reward
