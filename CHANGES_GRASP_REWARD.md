@@ -1,0 +1,233 @@
+# 移动抓取任务修改说明
+
+## 修改内容
+
+### 1. 恢复目标重力并降低移动速度
+
+**修改文件**: `mobile_grasp_env_cfg.py`
+
+#### 目标物理属性变化
+- **重力**: `disable_gravity: True` → `False`
+  - 现在目标会受重力影响，自然落地
+  - 可以被机械臂抓起并提升
+  
+- **阻尼**: 增加线性和角阻尼到 0.5
+  - 降低目标在地面上的滑动
+  - 稳定旋转运动
+
+- **初始高度**: `z: (0.15, 0.30)` → `z: (0.015, 0.020)`
+  - 目标现在生成在地面附近（立方体高 3cm，质心在 ~1.5cm）
+  - 让其自然落地而不是悬浮
+
+#### 移动速度降低
+- **速度范围**: ±0.25 m/s → **±0.10 m/s** (降低到原来的 40%)
+- 应用于：
+  - 初始随机速度
+  - 周期性速度随机化 (每 2-4 秒)
+
+### 2. 基于提起高度的抓取判定
+
+**修改文件**: `mdp/rewards.py`, `mobile_grasp_env_cfg.py`
+
+#### 新的判定标准
+**旧方式** (基于夹爪角度):
+```python
+# 夹爪关节角 < 阈值 → 判定为"抓住"
+gripper_closed = gripper_pos < GRIPPER_CLOSED_THRESHOLD
+```
+
+**新方式** (基于提起高度):
+```python
+# 目标质心高度 >= 阈值 → 判定为"抓住"
+lifted = target_z >= LIFT_HEIGHT_THRESHOLD
+```
+
+#### 新增参数
+```python
+LIFT_HEIGHT_THRESHOLD = 0.35  # m (目标必须达到的高度)
+LIFT_DWELL_TIME = 0.3         # s (必须保持的时间)
+TARGET_VELOCITY_RANGE = 0.10  # m/s (移动速度范围)
+```
+
+#### 新增奖励函数
+- **`GraspBonusLift`**: 检测目标是否被提起到指定高度并保持
+  - 不再依赖夹爪角度
+  - 直接检测目标的 Z 坐标
+  - 需要连续保持 0.3 秒才算成功
+
+- **`retract_bonus`** 也已更新为基于提起高度判定
+
+#### 奖励权重调整
+- `grasp` 权重: 5.0 → **10.0** (提高吸引力，因为这是真正的任务目标)
+- 课程学习时间表已修正 (从 12000000 步改为 12000 步)
+
+### 3. 两个训练版本配置
+
+#### 版本 A: 移动目标 (默认)
+使用 `MobileGraspEnvCfg`:
+```bash
+./isaaclab.sh -p scripts/rsl_rl/train.py --task Isaac-Mobile-Grasp-Eggtart-v0
+```
+
+特点:
+- 目标初始速度: ±0.10 m/s (随机方向)
+- 每 2-4 秒改变一次运动方向
+- 机器人需要学会追踪和预测
+
+#### 版本 B: 静止目标
+使用 `MobileGraspEnvStaticCfg`:
+```bash
+./isaaclab.sh -p scripts/rsl_rl/train.py --task Isaac-Mobile-Grasp-Eggtart-Static-v0
+```
+
+特点:
+- 目标初始速度: 0 (完全静止)
+- 周期性速度随机化被禁用 (间隔设为 1 小时)
+- 降低任务难度，适合初期训练
+
+## 使用方法
+
+### 1. 注册新任务
+
+在 `agents/__init__.py` 或相应的注册文件中添加:
+
+```python
+from eggtart_grasp.tasks.mobile_grasp.mobile_grasp_env_cfg import (
+    MobileGraspEnvCfg,
+    MobileGraspEnvStaticCfg,
+)
+
+# 移动目标版本
+gym.register(
+    id="Eggtart-Mobile-Grasp-v0",
+    entry_point="isaaclab.envs:ManagerBasedRLEnv",
+    kwargs={"env_cfg_entry_point": MobileGraspEnvCfg},
+)
+
+# 静止目标版本
+gym.register(
+    id="Eggtart-Mobile-Grasp-Static-v0",
+    entry_point="isaaclab.envs:ManagerBasedRLEnv",
+    kwargs={"env_cfg_entry_point": MobileGraspEnvStaticCfg},
+)
+```
+
+### 2. 训练建议
+
+#### 阶段 1: 从静止目标开始
+```bash
+./isaaclab.sh -p scripts/rsl_rl/train.py \
+    --task Isaac-Mobile-Grasp-Eggtart-Static-v0 \
+    --num_envs 2048 \
+    --max_iterations 1000
+```
+
+让机器人先学会:
+- 接近静止目标
+- 伸出末端执行器
+- 闭合夹爪
+- **提起目标到 0.35m 高度**
+
+#### 阶段 2: 转移到移动目标
+```bash
+./isaaclab.sh -p scripts/rsl_rl/train.py \
+    --task Isaac-Mobile-Grasp-Eggtart-v0 \
+    --num_envs 2048 \
+    --max_iterations 2000 \
+    --resume \
+    --load_run <static_run_name>  # 可选：加载静止目标的策略
+```
+
+在已有基础上学习:
+- 追踪移动目标
+- 预测目标轨迹
+- 动态抓取
+
+### 3. 监控训练
+
+关键指标:
+- **`Rewards/grasp`**: 提起奖励，应该逐渐增加
+- **`Metrics/target_height`**: 目标高度，成功时应该 > 0.35m
+- **`Curriculum/grasp_sched`**: 抓取奖励权重，在 iter ~500 时启用
+
+## 技术细节
+
+### 为什么改用高度判定？
+
+#### 旧方法的问题
+力控夹爪下，物体会挡住夹爪：
+- 30mm 立方体停在 q≈0.29
+- 如果阈值是 -0.15 或更小，"夹住"条件永远不成立
+- 即使调整阈值，也无法区分"夹住物体"和"夹住空气"
+
+#### 新方法的优势
+1. **直接测量任务目标**: 提起物体才是真正的目标
+2. **鲁棒性**: 不受夹爪机械特性影响
+3. **可验证**: 高度是客观可测的物理量
+4. **自适应**: 对不同大小的物体都有效
+
+### 高度阈值选择
+
+```python
+LIFT_HEIGHT_THRESHOLD = 0.35  # m
+```
+
+理由:
+- 目标初始高度: 0.015 - 0.020 m (地面)
+- 需要提升 ~0.33 m 才算成功
+- 足够高以证明真正抓住了物体
+- 不会太高以至于超出机械臂工作空间
+
+### 保持时间选择
+
+```python
+LIFT_DWELL_TIME = 0.3  # s
+```
+
+理由:
+- 避免"瞬间碰撞导致目标弹起"被误判为成功
+- 要求机器人真正夹住并稳定保持
+- 0.3 秒 ≈ 9 个仿真步 (dt=1/30s)，足够验证稳定性
+
+## 预期行为变化
+
+### 训练初期
+- 机器人仍然会学习接近和闭合夹爪（引导奖励）
+- 但只有真正提起目标才会获得大奖励（10.0 权重）
+
+### 训练中期
+- 策略应该学会"接近 → 闭合 → 向上移动"的序列
+- 目标高度应该逐渐增加
+- 夹爪力度应该自适应调整（力控优势）
+
+### 训练后期
+- 移动目标版本：学会预测性抓取
+- 回收动作：提起后机械臂回到默认姿态
+
+## 故障排查
+
+### 如果 `Rewards/grasp` 一直是 0:
+1. 检查 `Curriculum/grasp_sched`: 可能还没启用（< iter 500）
+2. 检查目标高度: TensorBoard 中添加自定义观测
+3. 降低 `LIFT_HEIGHT_THRESHOLD` 到 0.25m 试试
+4. 降低 `LIFT_DWELL_TIME` 到 0.2s
+
+### 如果目标一直在地上不动:
+1. 确认重力已恢复: `disable_gravity=False`
+2. 检查初始高度: 应该接近地面
+3. 检查速度设置: 移动版本应该有非零速度
+
+### 如果夹爪夹不住目标:
+1. 检查 `gripper_action` 的 `max_effort`: 1.0 Nm 应该足够
+2. 检查 `gripper_close_guide` 权重: 应该在 iter 500 后启用
+3. 可能需要调整夹爪 PD 参数或力控参数
+
+## 未来改进方向
+
+1. **自适应高度阈值**: 根据目标大小动态调整
+2. **多阶段抓取奖励**: 
+   - 提起到 0.2m: +5
+   - 提起到 0.35m: +10
+   - 保持 > 1s: +5
+3. **接触力检测**: 结合接触传感器判断抓取质量
+4. **任务成功判定**: 将目标运送到指定位置

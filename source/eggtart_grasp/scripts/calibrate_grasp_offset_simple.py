@@ -122,7 +122,7 @@ def main():
     robot.write_joint_state_to_sim(joint_pos, robot.data.default_joint_vel)
     scene.reset()
 
-    # Setup markers
+    # Setup markers - use independent paths, we'll position them manually in EE frame
     ee_cfg = SceneEntityCfg("robot", body_names=["end_effector"])
     link005_cfg = SceneEntityCfg("robot", body_names=["link_005"])
 
@@ -187,46 +187,45 @@ def main():
         scene.sim.step()
         scene.update(sim_dt)
 
-        # Update markers every frame
+        # Update markers every frame - compute world positions from EE local offsets
         # Get poses
         ee_pos_w = robot.data.body_pos_w[0, ee_body_idx]
         ee_quat_w = robot.data.body_quat_w[0, ee_body_idx]
         link005_pos_w = robot.data.body_pos_w[0, link005_body_idx]
         link005_quat_w = robot.data.body_quat_w[0, link005_body_idx]
 
-        # Current grasp point
+        # Current grasp point: EE local offset -> world position
         current_grasp_w = ee_pos_w + quat_apply(ee_quat_w, current_offset)
         grasp_marker.visualize(current_grasp_w.unsqueeze(0), identity_quat)
 
-        # EE frame
+        # EE frame at EE origin
         ee_frame_marker.visualize(ee_pos_w.unsqueeze(0), ee_quat_w.unsqueeze(0))
 
-        # Fixed jaw
-        fixed_jaw_w = link005_pos_w + quat_apply(link005_quat_w, fixed_jaw_torch)
-        fixed_jaw_marker.visualize(fixed_jaw_w.unsqueeze(0), identity_quat)
-
-        # Moving jaw
+        # Moving jaw: EE local offset -> world position
         moving_jaw_w = ee_pos_w + quat_apply(ee_quat_w, moving_jaw_torch)
         moving_jaw_marker.visualize(moving_jaw_w.unsqueeze(0), identity_quat)
 
-        # Auto-computed grasp (midpoint in world)
+        # Fixed jaw: link_005 local offset -> world position
+        fixed_jaw_w = link005_pos_w + quat_apply(link005_quat_w, fixed_jaw_torch)
+        fixed_jaw_marker.visualize(fixed_jaw_w.unsqueeze(0), identity_quat)
+
+        # Auto-computed grasp: midpoint in world, then report in EE local
         auto_grasp_w = (fixed_jaw_w + moving_jaw_w) / 2.0
         auto_marker.visualize(auto_grasp_w.unsqueeze(0), identity_quat)
 
-        # Compute auto offset in EE frame
-        if count == 120:  # After stabilization
-            auto_offset_w = auto_grasp_w - ee_pos_w
-            # Transform to EE frame
-            ee_quat_inv = torch.tensor(
+        # Print auto offset once after stabilization (in EE local frame)
+        if count == 120:
+            # Transform world midpoint to EE local frame
+            ee_quat_conj = torch.tensor(
                 [ee_quat_w[0], -ee_quat_w[1], -ee_quat_w[2], -ee_quat_w[3]],
                 device=robot.device
             )
-            auto_offset_ee = quat_apply(ee_quat_inv, auto_offset_w)
+            auto_grasp_ee_local = quat_apply(ee_quat_conj, auto_grasp_w - ee_pos_w)
 
             print(f"\n{'='*70}")
             print("AUTO-COMPUTED OFFSET (from jaw geometry):")
-            print(f"  EGGTART_EE_GRASP_OFFSET = {tuple(auto_offset_ee.cpu().numpy())}")
-            print(f"\nDistance from current offset: {torch.norm(auto_offset_ee - current_offset).item():.4f} m")
+            print(f"  EGGTART_EE_GRASP_OFFSET = {tuple(auto_grasp_ee_local.cpu().numpy())}")
+            print(f"\nDistance from current offset: {torch.norm(auto_grasp_ee_local - current_offset).item():.4f} m")
             print(f"{'='*70}\n")
 
         count += 1

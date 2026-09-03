@@ -83,7 +83,7 @@ EGGTART_BASE_BODY_NAME = "base_link"
 # 数值是稳健的。
 #
 # 注意：q=1.0（全张开）时最近点配对会跳到爪子别处，测出的 43 mm 是退化结果，别用。
-EGGTART_EE_GRASP_OFFSET = (-0.0288, -0.0452, -0.0607)
+EGGTART_EE_GRASP_OFFSET = (-0.00092977, -0.0237725, -0.05601)
 
 # 四个轮子 body 的名字正则，用来算底盘几何中心。
 #

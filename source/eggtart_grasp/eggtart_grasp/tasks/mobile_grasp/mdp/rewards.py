@@ -63,39 +63,57 @@ def _base_center_w(robot: Articulation, base_cfg: SceneEntityCfg) -> torch.Tenso
 def base_to_target_xy_tanh(
     env: ManagerBasedRLEnv,
     std: float,
-    standoff: float = 0.35,
+    standoff: float = 0.4,
     robot_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
     target_cfg: SceneEntityCfg = SceneEntityCfg("target"),
     base_cfg: SceneEntityCfg = SceneEntityCfg("robot", body_names="wheel_.*"),
+    arm_link1_cfg: SceneEntityCfg | None = None,
 ) -> torch.Tensor:
     """奖励底盘在水平面停到目标旁边合适的距离上
 
-    用 tanh 核把"底盘几何中心到目标的水平距离与 standoff 的偏差"映射到 [0, 1]。
+    用 tanh 核把"参考点到目标的水平距离与 standoff 的偏差"映射到 [0, 1]。
     距离等于 standoff 时奖励最高，越偏离越低。
 
-    位置基点用轮心而不是 root 原点，原因见 :func:`_base_center_w`。
+    **参考点选择**：
+        - 如果提供 arm_link1_cfg，使用机械臂 link1 的坐标原点作为参考点
+        - 否则使用底盘几何中心（四个轮子的均值）作为参考点
+
+    使用 link1 作为参考点的优势：
+        - link1 是机械臂的第一个关节，位置更接近机械臂工作空间的起点
+        - 相比底盘中心，link1 的位置能更直接地反映机械臂能否够到目标
+        - 当底盘朝向改变时，link1 的位置变化更能体现机械臂接近目标的实际效果
+
+    位置基点不能用 root 原点，原因见 :func:`_base_center_w`。
 
     **关于 standoff**：
         不能奖励"距离趋近 0"——那是让底盘压到目标上面去，机械臂反而没法伸展。
         实测零位姿下末端执行器在轮心前方约 0.19 m、高 0.28 m，机械臂还能往前伸，
-        所以底盘中心停在目标外 0.3~0.4 m 比较合适。默认 0.35 m。
-        若想恢复"越近越好"的旧行为，把 standoff 设为 0.0。
+        所以参考点停在目标外 0.3~0.4 m 比较合适。默认 0.35 m。
 
     Args:
         env: 环境实例
         std: 平滑参数，控制奖励曲线的陡峭程度
-        standoff: 期望的底盘中心到目标的水平距离（米）
+        standoff: 期望的参考点到目标的水平距离（米）
         robot_cfg: 机器人实体配置
         target_cfg: 目标物体实体配置
-        base_cfg: 底盘参考 body 配置，默认四个轮子
+        base_cfg: 底盘参考 body 配置，默认四个轮子（用于 arm_link1_cfg=None 时）
+        arm_link1_cfg: 机械臂 link1 实体配置，如果提供则使用 link1 作为参考点
 
     Returns:
         shape (num_envs,) 的奖励张量，范围 [0, 1]
     """
     robot: Articulation = env.scene[robot_cfg.name]
     target: RigidObject = env.scene[target_cfg.name]
-    base_xy = _base_center_w(robot, base_cfg)[:, :2]
-    dist_xy = torch.norm(base_xy - target.data.root_pos_w[:, :2], dim=1)
+
+    # 选择参考点：link1 或底盘中心
+    if arm_link1_cfg is not None:
+        # 使用机械臂 link1 的坐标原点
+        ref_pos_xy = robot.data.body_pos_w[:, arm_link1_cfg.body_ids[0], :2]
+    else:
+        # 使用底盘几何中心（轮子均值）
+        ref_pos_xy = _base_center_w(robot, base_cfg)[:, :2]
+
+    dist_xy = torch.norm(ref_pos_xy - target.data.root_pos_w[:, :2], dim=1)
     return 1.0 - torch.tanh((dist_xy - standoff).abs() / std)
 
 def base_facing_target(
@@ -166,7 +184,7 @@ def base_facing_target(
 
 def base_velocity_l2(
     env: ManagerBasedRLEnv,
-    standoff: float = 0.35,
+    standoff: float = 0.4,
     arrive_tol: float = 0.15,
     align_tol: float = 0.6,
     ang_vel_scale: float = 0.3,
@@ -177,7 +195,7 @@ def base_velocity_l2(
 ) -> torch.Tensor:
     """惩罚底盘"到位之后还在动"（水平线速度 + 偏航角速度），带平滑门控
 
-    **为什么需要这一项（现有惩罚项为什么不够）**：
+    **为什么需要这一项（现有惩罚项为什么不够）**
         1. ``action_rate_l2`` 罚的是动作的**变化量**。底盘匀速绕圈时动作近似恒定，
            变化量几乎为 0，绕圈基本不花钱，罚不到。
         2. ``joint_vel_l2`` 目前只作用在机械臂关节上；而且更根本的是
@@ -187,14 +205,14 @@ def base_velocity_l2(
         3. Isaac Lab 自带的 ``lin_vel_z_l2`` / ``ang_vel_xy_l2`` 管的是竖直方向和
            翻滚俯仰，不管水平 xy 平移和偏航。
 
-    **为什么底盘会绕圈**：
+    **为什么底盘会绕圈**
         ``base_to_target_xy_tanh`` 在"轮心到目标距离 == standoff"时最大，
         ``base_facing_target`` 在"工作面指向目标"时最大。这两个条件在
         **半径 standoff 的整个圆周上都同时满足**——沿切向漂移不损失任何奖励，
         于是策略就在圆上打转。这一项的作用是打破这个对称性（给"停住"一个理由），
         而不只是让动作平滑一点。
 
-    **为什么要门控（不能无条件罚速度）**：
+    **为什么要门控（不能无条件罚速度）**
         无条件罚速度会和 ``base_approach`` 直接对抗，策略可能干脆原地不动；
         而且目标每 2~4 s 会重新随机速度，底盘本来就需要重新追。
         所以只在"已经到位 **且** 已经对准"时才全力生效：
@@ -257,9 +275,16 @@ def _grasp_point_w(
     robot: Articulation,
     ee_cfg: SceneEntityCfg,
     grasp_offset: tuple[float, float, float] | None = None,
+    use_link5_com: bool = False,
+    link5_cfg: SceneEntityCfg | None = None,
 ) -> torch.Tensor:
     """真实抓取点在世界系下的坐标
 
+    支持两种计算方式：
+    1. 使用 end_effector body 原点 + grasp_offset (默认)
+    2. 使用 link_005 的质心位置 (use_link5_com=True)
+
+    **方式1（默认）**：
     夹爪是"固定爪 + 活动爪"结构：固定爪(part_034)挂在 link_005 上，活动爪(part_035)
     挂在 end_effector 上，**真正的抓取点在两爪之间**，不是 end_effector 的 body 原点。
     实测偏差 (end_effector 局部系) = (-0.0138, -0.0246, -0.0016)，|d| = 0.028 m，
@@ -268,21 +293,34 @@ def _grasp_point_w(
     2.8 cm 相对 GRASP_REACH_THRESHOLD=0.05 m 是同一量级，不修的话策略会把
     body 原点怼到目标上，抓取点其实还在目标后面 2.7 cm，夹爪合上是空的。
 
+    **方式2（新增）**：
+    直接使用 link_005 的质心位置作为参考点，不需要额外偏移。
+    link_005 是机械臂最后一个连杆，其质心位置能更好地代表机械臂末端的实际位置。
+
     Args:
         robot: 机器人 articulation
         ee_cfg: 末端执行器实体配置（须带 body_names）
         grasp_offset: 抓取点相对 body 原点的偏移，None 表示不偏移（退化为 body 原点）
+        use_link5_com: 是否使用 link5 质心作为参考点（忽略 grasp_offset）
+        link5_cfg: link5 实体配置，use_link5_com=True 时必须提供
 
     Returns:
         shape (num_envs, 3) 的世界系坐标
     """
-    ee_pos_w = robot.data.body_pos_w[:, ee_cfg.body_ids[0]]
-    if grasp_offset is None:
-        return ee_pos_w
-    ee_quat_w = robot.data.body_quat_w[:, ee_cfg.body_ids[0]]
-    off = torch.tensor(grasp_offset, device=ee_pos_w.device, dtype=ee_pos_w.dtype)
-    off = off.unsqueeze(0).expand(ee_pos_w.shape[0], -1)
-    return ee_pos_w + quat_apply(ee_quat_w, off)
+    if use_link5_com:
+        # 使用 link5 质心位置
+        if link5_cfg is None:
+            raise ValueError("link5_cfg must be provided when use_link5_com=True")
+        return robot.data.body_com_pos_w[:, link5_cfg.body_ids[0]]
+    else:
+        # 使用 end_effector body 原点 + 可选偏移
+        ee_pos_w = robot.data.body_pos_w[:, ee_cfg.body_ids[0]]
+        if grasp_offset is None:
+            return ee_pos_w
+        ee_quat_w = robot.data.body_quat_w[:, ee_cfg.body_ids[0]]
+        off = torch.tensor(grasp_offset, device=ee_pos_w.device, dtype=ee_pos_w.dtype)
+        off = off.unsqueeze(0).expand(ee_pos_w.shape[0], -1)
+        return ee_pos_w + quat_apply(ee_quat_w, off)
 
 
 def _ee_to_target_distance(
@@ -290,19 +328,25 @@ def _ee_to_target_distance(
     ee_cfg: SceneEntityCfg,
     target_cfg: SceneEntityCfg,
     grasp_offset: tuple[float, float, float] | None = None,
+    use_link5_com: bool = False,
+    link5_cfg: SceneEntityCfg | None = None,
 ) -> torch.Tensor:
     """计算**抓取点**到目标的欧氏距离（辅助函数）
+
     Args:
         env: 环境实例
         ee_cfg: 末端执行器实体配置
         target_cfg: 目标物体实体配置
         grasp_offset: 抓取点相对 end_effector body 原点的偏移（局部系）
+        use_link5_com: 是否使用 link5 质心作为参考点
+        link5_cfg: link5 实体配置，use_link5_com=True 时必须提供
+
     Returns:
         shape (num_envs,) 的距离张量，单位：米
     """
     robot: Articulation = env.scene[ee_cfg.name]
     target: RigidObject = env.scene[target_cfg.name]
-    grasp_w = _grasp_point_w(robot, ee_cfg, grasp_offset)
+    grasp_w = _grasp_point_w(robot, ee_cfg, grasp_offset, use_link5_com, link5_cfg)
     return torch.norm(grasp_w - target.data.root_pos_w, dim=1)
 
 def ee_to_target_tanh(
@@ -311,19 +355,29 @@ def ee_to_target_tanh(
     ee_cfg: SceneEntityCfg = SceneEntityCfg("robot", body_names="end_effector"),
     target_cfg: SceneEntityCfg = SceneEntityCfg("target"),
     grasp_offset: tuple[float, float, float] | None = None,
+    use_link5_com: bool = False,
+    link5_cfg: SceneEntityCfg | None = None,
 ) -> torch.Tensor:
     """奖励抓取点接近目标（使用 tanh 核）
     三维空间距离越近，奖励越高。
+
+    支持两种计算方式：
+    1. end_effector body 原点 + grasp_offset (默认)
+    2. link5 质心位置 (use_link5_com=True)
+
     Args:
         env: 环境实例
         std: 平滑参数
         ee_cfg: 末端执行器实体配置
         target_cfg: 目标物体实体配置
         grasp_offset: 抓取点相对 end_effector body 原点的偏移（局部系）
+        use_link5_com: 是否使用 link5 质心作为参考点
+        link5_cfg: link5 实体配置，use_link5_com=True 时必须提供
+
     Returns:
         shape (num_envs,) 的奖励张量，范围 [0, 1]
     """
-    dist = _ee_to_target_distance(env, ee_cfg, target_cfg, grasp_offset)
+    dist = _ee_to_target_distance(env, ee_cfg, target_cfg, grasp_offset, use_link5_com, link5_cfg)
     return 1.0 - torch.tanh(dist / std)
 
 
@@ -332,99 +386,29 @@ def ee_to_target_distance_l2(
     ee_cfg: SceneEntityCfg = SceneEntityCfg("robot", body_names="end_effector"),
     target_cfg: SceneEntityCfg = SceneEntityCfg("target"),
     grasp_offset: tuple[float, float, float] | None = None,
+    use_link5_com: bool = False,
+    link5_cfg: SceneEntityCfg | None = None,
 ) -> torch.Tensor:
     """返回抓取点到目标的 L2 距离（配合负权重使用）
     直接返回距离值，通常配合负权重作为惩罚项。
+
     Args:
         env: 环境实例
         ee_cfg: 末端执行器实体配置
         target_cfg: 目标物体实体配置
         grasp_offset: 抓取点相对 end_effector body 原点的偏移（局部系）
+        use_link5_com: 是否使用 link5 质心作为参考点
+        link5_cfg: link5 实体配置，use_link5_com=True 时必须提供
+
     Returns:
         shape (num_envs,) 的距离张量，单位：米
     """
-    return _ee_to_target_distance(env, ee_cfg, target_cfg, grasp_offset)
-
-
-def grasp_bonus(
-    env: ManagerBasedRLEnv,
-    reach_threshold: float,
-    gripper_closed_threshold: float,
-    ee_cfg: SceneEntityCfg = SceneEntityCfg("robot", body_names="end_effector"),
-    gripper_cfg: SceneEntityCfg = SceneEntityCfg("robot", joint_names=["end_effector_joint"]),
-    target_cfg: SceneEntityCfg = SceneEntityCfg("target"),
-    grasp_offset: tuple[float, float, float] | None = None,
-) -> torch.Tensor:
-    """抓取奖励：当抓取点接近目标且夹爪闭合时给予 1.0 奖励
-    两个条件同时满足时触发：
-    1. 抓取点距离目标 < reach_threshold
-    2. 夹爪关节角度 < gripper_closed_threshold（闭合状态）
-
-    **注意 gripper_closed_threshold 必须在关节硬限位之内**，否则条件恒不成立、
-    本项恒为 0。end_effector_joint 的硬限位是 (-0.2, 1.57)，所以阈值必须 > -0.2。
-    Args:
-        env: 环境实例
-        reach_threshold: 到达阈值（米）
-        gripper_closed_threshold: 夹爪闭合角度阈值（弧度）
-        ee_cfg: 末端执行器实体配置
-        gripper_cfg: 夹爪关节实体配置
-        target_cfg: 目标物体实体配置
-        grasp_offset: 抓取点相对 end_effector body 原点的偏移（局部系）
-    Returns:
-        shape (num_envs,) 的奖励张量，0 或 1
-    """
-    robot: Articulation = env.scene[ee_cfg.name]
-    dist = _ee_to_target_distance(env, ee_cfg, target_cfg, grasp_offset)
-    gripper_pos = robot.data.joint_pos[:, gripper_cfg.joint_ids[0]]
-    is_near = dist < reach_threshold
-    is_closed = gripper_pos < gripper_closed_threshold
-    return (is_near & is_closed).float()
-
-
-def retract_bonus(
-    env: ManagerBasedRLEnv,
-    reach_threshold: float,
-    gripper_closed_threshold: float,
-    std: float,
-    arm_cfg: SceneEntityCfg = SceneEntityCfg("robot", joint_names=["link_00[1-5]_joint"]),
-    ee_cfg: SceneEntityCfg = SceneEntityCfg("robot", body_names="end_effector"),
-    gripper_cfg: SceneEntityCfg = SceneEntityCfg("robot", joint_names=["end_effector_joint"]),
-    target_cfg: SceneEntityCfg = SceneEntityCfg("target"),
-    grasp_offset: tuple[float, float, float] | None = None,
-) -> torch.Tensor:
-    """回收奖励：抓取成功后，奖励机械臂回到初始姿态
-    只有在"正在抓取"状态下（抓取点接近目标且夹爪闭合）才给予奖励。
-    奖励值与机械臂关节偏离初始姿态的距离成反比。
-
-    **依赖 gripper_closed_threshold 可达**，见 :func:`grasp_bonus` 的说明。
-    Args:
-        env: 环境实例
-        reach_threshold: 到达阈值（米）
-        gripper_closed_threshold: 夹爪闭合角度阈值（弧度）
-        std: 平滑参数
-        arm_cfg: 机械臂关节实体配置
-        ee_cfg: 末端执行器实体配置
-        gripper_cfg: 夹爪关节实体配置
-        target_cfg: 目标物体实体配置
-        grasp_offset: 抓取点相对 end_effector body 原点的偏移（局部系）
-    Returns:
-        shape (num_envs,) 的奖励张量，范围 [0, 1](非抓取状态为0)
-    """
-    robot: Articulation = env.scene[arm_cfg.name]
-    dist = _ee_to_target_distance(env, ee_cfg, target_cfg, grasp_offset)
-    gripper_pos = robot.data.joint_pos[:, gripper_cfg.joint_ids[0]]
-    grasping = (dist < reach_threshold) & (gripper_pos < gripper_closed_threshold)
-
-    arm_pos = robot.data.joint_pos[:, arm_cfg.joint_ids]
-    arm_home = robot.data.default_joint_pos[:, arm_cfg.joint_ids]
-    home_err = torch.norm(arm_pos - arm_home, dim=1)
-    return grasping.float() * (1.0 - torch.tanh(home_err / std))
-
+    return _ee_to_target_distance(env, ee_cfg, target_cfg, grasp_offset, use_link5_com, link5_cfg)
 
 class grasp_bonus_dwell(ManagerTermBase):
     """抓取奖励（带停留计时）：抓取点在阈值内**连续停留**足够久后，闭合夹爪才算有效
 
-    **为什么需要计时**：
+    **为什么需要计时**
         原来的 :func:`grasp_bonus` 是逐步瞬时判定的：只要"这一帧"抓取点进了
         reach_threshold 且夹爪闭合就给奖励。策略于是学会一边冲向目标一边提前闭爪——
         因为闭爪本身零成本，早闭一点还能提高"恰好在某一帧同时满足两个条件"的概率。
@@ -433,13 +417,13 @@ class grasp_bonus_dwell(ManagerTermBase):
         加上"连续停留 dwell_time 秒"的门槛后，提前闭爪不再有收益：奖励只在
         抓取点已经稳定停在目标上之后才生效，策略必须先对准、稳住，再闭爪。
 
-    **计数器语义**：
+    **计数器语义**
         每个 env 维护一个 ``_dwell_steps`` 计数器（单位：env step，不是物理 step）。
         抓取点在阈值内则 +1，一旦离开阈值立刻**归零**（要求"连续"，不是"累计"）。
         这就是为什么必须写成类：需要跨 step 的 per-env 状态，而且状态要能在
         episode 重置时清掉 —— RewardManager 会对类式项自动调用 ``reset(env_ids)``。
 
-    **和 grasp_bonus 的区别**：
+    **和 grasp_bonus 的区别**
         除了计时，本项还把奖励做成了软的：满足条件时返回 1.0，
         并且在停留时间还没攒够时返回 0（不给部分奖励，避免又变成"早闭爪也有点分"）。
     """
@@ -549,19 +533,19 @@ def gripper_close_when_near(
     target_cfg: SceneEntityCfg = SceneEntityCfg("target"),
     grasp_offset: tuple[float, float, float] | None = None,
     gripper_open_pos: float = 1.0,
-    gripper_full_close_pos: float = 0.35,
+    gripper_full_close_pos: float = 0.05,
 ) -> torch.Tensor:
-    """奖励"接近目标时闭合夹爪"（引导性稠密奖励，帮助policy学会基本抓取动作）
+    """惩罚"接近目标时不闭合夹爪"（引导性惩罚，强制policy学会基本抓取动作）
 
-    这是一个稠密引导奖励，在 grasp_bonus_dwell（稀疏）之前使用。
-    当抓取点接近目标时，闭合程度越高奖励越大，鼓励策略学会"靠近 -> 闭合"的动作序列。
+    改为惩罚版本：当接近目标时，夹爪越打开，惩罚越大（配合负权重使用）。
+    这比正向奖励"闭合有加分"更强——不闭合会真的扣分。
 
     **力控下的归一化要点**：
         夹爪改成力控后，夹住物体时关节**到不了硬限位**（被物体挡住）。
         实测 30 mm 立方体停在 q≈0.29。如果还按"闭到 -0.2 才算满分"归一化，
         策略把物体夹稳了也只能拿到约 59% 的分，白白留下一截拿不到的奖励，
         梯度会一直推着它加大夹持力去挤物体。
-        所以满分点用 ``gripper_full_close_pos``（默认 0.35，与
+        所以满分点用 ``gripper_full_close_pos``（默认 0.05，与
         ``GRIPPER_CLOSED_THRESHOLD`` 对齐），夹到该角度即视为完全闭合。
 
     Args:
@@ -569,25 +553,193 @@ def gripper_close_when_near(
         reach_threshold: 距离阈值（米），在这个距离内算"接近"
         ee_cfg, gripper_cfg, target_cfg: 实体配置
         grasp_offset: 抓取点相对 end_effector body 原点的偏移
-        gripper_open_pos: 夹爪完全张开的关节角（奖励 0 的那一端）
-        gripper_full_close_pos: 视为"完全闭合"的关节角（奖励 1 的那一端）
+        gripper_open_pos: 夹爪完全张开的关节角（惩罚最大的那一端）
+        gripper_full_close_pos: 视为"完全闭合"的关节角（惩罚为0的那一端）
 
     Returns:
-        shape (num_envs,)，范围 [0, 1]
-        - 接近目标 且 夹爪闭合 -> 1.0
-        - 接近目标 但 夹爪打开 -> 0.0
-        - 远离目标 -> 0.0
+        shape (num_envs,)，范围 [0, 1]，配合负权重使用
+        - 接近目标 且 夹爪打开 -> 1.0 (配合负权重 → 扣分)
+        - 接近目标 且 夹爪闭合 -> 0.0 (不扣分)
+        - 远离目标 -> 0.0 (不扣分)
     """
     robot: Articulation = env.scene[ee_cfg.name]
 
-    # 距离门控：只在接近时才鼓励闭合
+    # 距离门控：只在接近时才惩罚不闭合
     dist = _ee_to_target_distance(env, ee_cfg, target_cfg, grasp_offset)
     proximity = torch.exp(-torch.square(dist / (reach_threshold * 0.5)))
 
-    # 闭合程度归一化到 [0, 1]：open -> 0，full_close -> 1
+    # 张开程度归一化到 [0, 1]：full_close -> 0 (不惩罚)，open -> 1 (最大惩罚)
     gripper_pos = robot.data.joint_pos[:, gripper_cfg.joint_ids[0]]
     span = max(gripper_open_pos - gripper_full_close_pos, 1e-6)
-    close_amount = torch.clamp((gripper_open_pos - gripper_pos) / span, 0.0, 1.0)
+    open_amount = torch.clamp((gripper_pos - gripper_full_close_pos) / span, 0.0, 1.0)
 
-    return proximity * close_amount
+    return proximity * open_amount
 
+
+def ee_lift_when_near(
+    env: ManagerBasedRLEnv,
+    reach_threshold: float,
+    gripper_closed_threshold: float,
+    lift_height_target: float = 0.35,
+    ee_cfg: SceneEntityCfg = SceneEntityCfg("robot", body_names="end_effector"),
+    gripper_cfg: SceneEntityCfg = SceneEntityCfg("robot", joint_names=["end_effector_joint"]),
+    target_cfg: SceneEntityCfg = SceneEntityCfg("target"),
+    grasp_offset: tuple[float, float, float] | None = None,
+    use_link5_com: bool = False,
+    link5_cfg: SceneEntityCfg | None = None,
+) -> torch.Tensor:
+    """距离近且夹爪闭合时，提起末端获得奖励（第三阶段稠密引导）
+
+    当末端接近目标且夹爪已闭合时，鼓励策略提升末端高度。
+    末端越高（接近 lift_height_target），奖励越高。
+
+    这是一个稠密引导奖励，在主抓取奖励（GraspBonusLift）之前使用，
+    帮助策略学会"接近 -> 闭合 -> 提起"的完整动作序列。
+
+    Args:
+        env: 环境实例
+        reach_threshold: 距离阈值（米），小于此距离才激活
+        gripper_closed_threshold: 夹爪闭合阈值，小于此值算闭合
+        lift_height_target: 目标提升高度（米）
+        ee_cfg: 末端执行器实体配置
+        gripper_cfg: 夹爪关节实体配置
+        target_cfg: 目标物体实体配置
+        grasp_offset: 抓取点偏移
+        use_link5_com: 是否使用 link5 质心
+        link5_cfg: link5 实体配置
+
+    Returns:
+        shape (num_envs,)，范围约 [0, 1]
+        - 接近 且 闭合 且 提起 -> ~1.0
+        - 不满足任何条件 -> 0.0
+    """
+    robot: Articulation = env.scene[ee_cfg.name]
+    target: RigidObject = env.scene[target_cfg.name]
+
+    # 门控1：距离是否接近
+    dist = _ee_to_target_distance(env, ee_cfg, target_cfg, grasp_offset, use_link5_com, link5_cfg)
+    near = (dist < reach_threshold).float()
+
+    # 门控2：夹爪是否闭合
+    gripper_pos = robot.data.joint_pos[:, gripper_cfg.joint_ids[0]]
+    closed = (gripper_pos < gripper_closed_threshold).float()
+
+    # 门控：距离近 且 夹爪闭合
+    gate = near * closed
+
+    # 末端高度（使用与距离计算相同的参考点）
+    if use_link5_com and link5_cfg is not None:
+        ee_z = robot.data.body_com_pos_w[:, link5_cfg.body_ids[0], 2]
+    else:
+        ee_pos_w = _grasp_point_w(robot, ee_cfg, grasp_offset, use_link5_com, link5_cfg)
+        ee_z = ee_pos_w[:, 2]
+
+    # 提升奖励：高度越接近目标高度，奖励越高
+    # 目标初始在地面约 0.02m，鼓励提升到 lift_height_target
+    lift_progress = torch.clamp((ee_z - 0.02) / (lift_height_target - 0.02), 0.0, 1.0)
+
+    return gate * lift_progress
+
+
+class GraspBonusLift(ManagerTermBase):
+    """基于提起高度的稀疏抓取奖励：目标必须被提起到指定高度并保持一段时间
+
+    不再依赖夹爪角度闭合判断，而是直接检测目标物体的高度：
+      - 目标质心高度 >= lift_height_threshold
+      - 连续保持 >= lift_dwell_time 秒
+      - 满足条件后给予 1.0 奖励
+
+    计数器是 per-env 的，目标低于阈值时立刻归零（要求连续保持）。
+    Episode 重置时计数器自动清零。
+
+    **为什么改用高度判定**：
+        力控夹爪下，夹住物体时夹爪被物体挡住，关节角度根本到不了预设阈值。
+        而抓取的真正目标是"提起物体"，高度是客观可测的物理量，不受夹爪机械特性影响。
+    """
+
+    def __init__(self, cfg: RewardTermCfg, env: ManagerBasedRLEnv):
+        super().__init__(cfg, env)
+        # 每个 env 独立的提起保持计数器（秒）
+        self._lift_counter = torch.zeros(env.num_envs, device=env.device)
+
+    def reset(self, env_ids: torch.Tensor | None = None):
+        """Episode 重置时归零计数器"""
+        if env_ids is None:
+            self._lift_counter.zero_()
+        else:
+            self._lift_counter[env_ids] = 0.0
+
+    def __call__(
+        self,
+        env: ManagerBasedRLEnv,
+        lift_height_threshold: float,
+        lift_dwell_time: float,
+        target_cfg: SceneEntityCfg,
+    ) -> torch.Tensor:
+        """
+        Args:
+            env: 环境实例
+            lift_height_threshold: 目标质心必须达到的高度（米）
+            lift_dwell_time: 必须保持在高度阈值以上的时间（秒）
+            target_cfg: 目标物体实体配置
+
+        Returns:
+            shape (num_envs,) 的奖励张量，0 或 1
+        """
+        target: RigidObject = env.scene[target_cfg.name]
+
+        # 1) 高度判断：目标质心的 Z 坐标
+        target_z = target.data.root_pos_w[:, 2]
+        lifted = target_z >= lift_height_threshold
+
+        # 2) 更新保持计数：在阈值以上 -> +dt，否则归零
+        dt = env.step_dt
+        self._lift_counter = torch.where(
+            lifted, self._lift_counter + dt, torch.zeros_like(self._lift_counter)
+        )
+
+        # 3) 只有保持时间 >= lift_dwell_time 才算成功
+        success = self._lift_counter >= lift_dwell_time
+
+        return success.float()
+
+
+# 导出名称供 cfg.py 使用
+grasp_bonus_lift = GraspBonusLift
+
+def retract_bonus_lift(
+    env: ManagerBasedRLEnv,
+    lift_height_threshold: float,
+    std: float,
+    arm_cfg: SceneEntityCfg,
+    target_cfg: SceneEntityCfg,
+) -> torch.Tensor:
+    """抓取后回收奖励：提起物体后，机械臂回到 nominal 姿态（基于提起高度判定）
+
+    只有在"已提起"状态下（目标高于阈值），机械臂关节越接近默认姿态奖励越高（高斯核）。
+
+    Args:
+        env: 环境实例
+        lift_height_threshold: 目标质心必须达到的高度（米）
+        std: 平滑参数，控制奖励曲线陡峭程度
+        arm_cfg: 机械臂关节实体配置
+        target_cfg: 目标物体实体配置
+
+    Returns:
+        shape (num_envs,) 的奖励张量，范围 [0, 1]
+    """
+    robot: Articulation = env.scene[arm_cfg.name]
+    target: RigidObject = env.scene[target_cfg.name]
+
+    # 判断是否已提起
+    target_z = target.data.root_pos_w[:, 2]
+    lifted = (target_z >= lift_height_threshold).float()
+
+    # 机械臂关节偏离 nominal 的距离（L2）
+    arm_joint_ids = arm_cfg.joint_ids
+    joint_pos = robot.data.joint_pos[:, arm_joint_ids]  # (num_envs, 5)
+    joint_pos_default = robot.data.default_joint_pos[:, arm_joint_ids]
+    error = torch.norm(joint_pos - joint_pos_default, dim=-1)
+
+    reward = lifted * torch.exp(-0.5 * (error / std) ** 2)
+    return reward

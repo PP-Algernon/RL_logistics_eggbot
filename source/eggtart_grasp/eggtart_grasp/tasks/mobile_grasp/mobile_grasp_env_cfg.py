@@ -37,9 +37,20 @@ from eggtart_grasp.assets.eggtart import (
 # ---------------------------------------------------------------------------
 # Tunable task constants
 # ---------------------------------------------------------------------------
+# 抓取成功判定：目标物体被提起到的高度阈值
+# 目标初始生成高度在地面附近(0.015-0.020 m)，这里要求提升到至少 0.35 m 算成功抓取
+LIFT_HEIGHT_THRESHOLD = 0.35  # m (目标质心高度)
+
+# 提起后必须保持在高度阈值以上这么久才算稳定抓取
+# 避免"瞬间碰到就给分"，要求真正夹住并保持
+LIFT_DWELL_TIME = 0.5  # s
+
+# 目标移动速度范围（用于随机初始速度和周期性速度变化）
+TARGET_VELOCITY_RANGE = 0.10  # m/s (±range，降低到原来的40%)
+
 # 抓取点落在这个距离内算"到达目标"
 # 调整建议：如果EE一直到不了，可以放宽到0.08甚至0.10；等学会了再收紧
-GRASP_REACH_THRESHOLD = 0.08      # m (放宽让policy更容易触发grasp)
+GRASP_REACH_THRESHOLD = 0.05      # m (放宽让policy更容易触发grasp)
 
 # 夹爪关节低于此角度算"闭合"
 #
@@ -75,15 +86,15 @@ class MobileGraspSceneCfg(InteractiveSceneCfg):
     # 机器人 -- 由具体配置填充
     robot: ArticulationCfg = MISSING
 
-    # 移动目标：小立方体，禁用重力使其能以恒定高度漂移
+    # 移动目标：小立方体，恢复重力使其能落地并被抓起
     target = RigidObjectCfg(
         prim_path="{ENV_REGEX_NS}/Target",
         spawn=sim_utils.CuboidCfg(
             size=(0.03, 0.03, 0.03),
             rigid_props=sim_utils.RigidBodyPropertiesCfg(
-                disable_gravity=True,
-                linear_damping=0.0,
-                angular_damping=0.0,
+                disable_gravity=False,  # 恢复重力，允许物体落地和被提起
+                linear_damping=0.5,      # 增加阻尼，降低滑动
+                angular_damping=0.5,     # 增加角阻尼，稳定旋转
             ),
             mass_props=sim_utils.MassPropertiesCfg(mass=0.05),
             collision_props=sim_utils.CollisionPropertiesCfg(),
@@ -147,12 +158,12 @@ class ObservationsCfg:
             func=mdp.target_position_in_base_frame,
             params={"robot_cfg": SceneEntityCfg("robot"), "target_cfg": SceneEntityCfg("target")},
         )
-        # 用真实抓取点（两爪之间），和奖励保持同一个基点
+        # 使用 link_005 作为参考点（夹爪运动不影响 link5 坐标系）
         ee_to_target_b = ObsTerm(
             func=mdp.ee_to_target_vector_base_frame,
             params={
                 "robot_cfg": SceneEntityCfg("robot"),
-                "ee_cfg": SceneEntityCfg("robot", body_names="end_effector"),
+                "ee_cfg": SceneEntityCfg("robot", body_names="link_005"),
                 "target_cfg": SceneEntityCfg("target"),
                 "grasp_offset": EGGTART_EE_GRASP_OFFSET,
             },
@@ -191,19 +202,27 @@ class EventCfg:
         func=mdp.reset_root_state_uniform,
         mode="reset",
         params={
-            # 在机器人前方/周围生成目标，处于可抓取高度
-            "pose_range": {"x": (0.4, 1.2), "y": (-0.6, 0.6), "z": (0.15, 0.30)},
-            "velocity_range": {"x": (-0.25, 0.25), "y": (-0.25, 0.25)},
+            # 在机器人前方/周围生成目标，地面高度（让它自然落地）
+            "pose_range": {"x": (0.4, 1.2), "y": (-0.6, 0.6), "z": (0.015, 0.020)},  # z降低到接近地面（立方体高0.03m，质心在0.015m）
+            "velocity_range": {
+                "x": (-TARGET_VELOCITY_RANGE, TARGET_VELOCITY_RANGE),
+                "y": (-TARGET_VELOCITY_RANGE, TARGET_VELOCITY_RANGE),
+            },
             "asset_cfg": SceneEntityCfg("target"),
         },
     )
     # 定期改变目标运动方向，使其成为真正的移动目标
+    # 注意：要实现"静止目标"版本，只需将此事件的 interval_range_s 设为很大的值，
+    # 或者在具体配置中覆盖 velocity_range 为 (0, 0)
     randomize_target_velocity = EventTerm(
         func=mdp.randomize_target_velocity,
         mode="interval",
         interval_range_s=(2.0, 4.0),
         params={
-            "velocity_range": {"x": (-0.25, 0.25), "y": (-0.25, 0.25)},
+            "velocity_range": {
+                "x": (-TARGET_VELOCITY_RANGE, TARGET_VELOCITY_RANGE),
+                "y": (-TARGET_VELOCITY_RANGE, TARGET_VELOCITY_RANGE),
+            },
             "asset_cfg": SceneEntityCfg("target"),
         },
     )
@@ -217,7 +236,8 @@ class RewardsCfg:
     # base_cfg 必须显式传：底盘位置要用轮心（几何中心），不能用 root_pos_w。
     # base_link 原点在车身外 0.435 m（实测轮心在 base_link 系 = -0.333, -0.282, 0.042），
     # 用 root 原点会让真正的车身停在离目标 0.435 m 的左后方。详见 rewards.py 的 _base_center_w。
-    # standoff: 底盘中心停在目标外 0.35 m，留出机械臂伸展的空间（不是越近越好）。
+    # standoff: 参考点停在目标外 0.35 m，留出机械臂伸展的空间（不是越近越好）。
+    # arm_link1_cfg: 使用机械臂 link1 作为参考点，比底盘中心更能反映机械臂工作空间
     base_approach = RewTerm(
         func=mdp.base_to_target_xy_tanh,
         weight=1.0,
@@ -227,6 +247,7 @@ class RewardsCfg:
             "robot_cfg": SceneEntityCfg("robot"),
             "target_cfg": SceneEntityCfg("target"),
             "base_cfg": SceneEntityCfg("robot", body_names=EGGTART_WHEEL_JOINT_BODY_REGEX),
+            "arm_link1_cfg": SceneEntityCfg("robot", body_names="link_001"),
         },
     )
     # 底盘朝向（工作面对准目标）
@@ -234,7 +255,7 @@ class RewardsCfg:
     # forward_axis 是底盘工作面在 base_link 系中的方向，本机器人为 -Y（见 rewards.py 说明）
     base_facing = RewTerm(
         func=mdp.base_facing_target,
-        weight=1.0,
+        weight=1.2,
         params={
             "std": 0.6,
             "forward_axis": EGGTART_BASE_FORWARD_AXIS,
@@ -244,15 +265,12 @@ class RewardsCfg:
         },
     )
     # 阶段 2: 末端执行器到达
-    # grasp_offset: 用真实抓取点（两爪之间），不是 end_effector body 原点。
-    # 两者差 2.8 cm（主要在前方），和 GRASP_REACH_THRESHOLD=0.05 同量级——
-    # 不修的话策略把 body 原点怼到目标上，抓取点其实还差 2.7 cm，夹爪合上是空的。
     ee_reach = RewTerm(
         func=mdp.ee_to_target_tanh,
-        weight=3.0,
+        weight=2.5,
         params={
             "std": 0.1,
-            "ee_cfg": SceneEntityCfg("robot", body_names="end_effector"),
+            "ee_cfg": SceneEntityCfg("robot", body_names="link_005"),
             "target_cfg": SceneEntityCfg("target"),
             "grasp_offset": EGGTART_EE_GRASP_OFFSET,
         },
@@ -261,7 +279,7 @@ class RewardsCfg:
         func=mdp.ee_to_target_distance_l2,
         weight=-0.2,
         params={
-            "ee_cfg": SceneEntityCfg("robot", body_names="end_effector"),
+            "ee_cfg": SceneEntityCfg("robot", body_names="link_005"),
             "target_cfg": SceneEntityCfg("target"),
             "grasp_offset": EGGTART_EE_GRASP_OFFSET,
         },
@@ -273,61 +291,71 @@ class RewardsCfg:
     # 计数器是 per-env 的，离开阈值立刻归零（要求连续，不是累计），
     # episode 重置时由 RewardManager 自动清零（类式奖励项才有这个能力）。
 
-    # 引导奖励：接近目标时鼓励闭合夹爪（稠密奖励，帮助policy学会基本动作）
+    # 引导惩罚：接近目标时不闭合夹爪会被惩罚（配合负权重）
     gripper_close_guide = RewTerm(
         func=mdp.gripper_close_when_near,
-        weight=2.0,  # 稠密引导，在grasp之前帮助policy建立"靠近->闭合"的关联
+        weight=-1.5,  # 加大惩罚：接近时不闭合 → 扣分，逼策略必须闭合
         params={
             "reach_threshold": GRASP_REACH_THRESHOLD,
-            "ee_cfg": SceneEntityCfg("robot", body_names="end_effector"),
+            "ee_cfg": SceneEntityCfg("robot", body_names="link_005"),
             "gripper_cfg": SceneEntityCfg("robot", joint_names=[EGGTART_GRIPPER_JOINT_NAME]),
             "target_cfg": SceneEntityCfg("target"),
             "grasp_offset": EGGTART_EE_GRASP_OFFSET,
         },
     )
 
-    # 稀疏抓取奖励（最终目标，需要停留+闭合）
-    grasp = RewTerm(
-        func=mdp.grasp_bonus_dwell,
-        weight=5.0,
-        params={
-            "reach_threshold": GRASP_REACH_THRESHOLD,
-            "gripper_closed_threshold": GRIPPER_CLOSED_THRESHOLD,
-            "dwell_time": GRASP_DWELL_TIME,
-            "ee_cfg": SceneEntityCfg("robot", body_names="end_effector"),
-            "gripper_cfg": SceneEntityCfg("robot", joint_names=[EGGTART_GRIPPER_JOINT_NAME]),
-            "target_cfg": SceneEntityCfg("target"),
-            "grasp_offset": EGGTART_EE_GRASP_OFFSET,
-        },
-    )
     # 主动惩罚"还没到位就闭爪"。
     # 只加停留计时是消极约束（拿不到分但也不亏），策略可能保持闭爪的习惯；
     # 这一项让提前闭爪真的要花钱，"张爪接近 -> 到位稳住 -> 再闭合"才最优。
     gripper_early = RewTerm(
         func=mdp.gripper_premature_close,
-        weight=-0.01,
+        weight=-0.5,  # 加大惩罚：远离时闭合也要扣分，避免"一直闭着"
         params={
             "reach_threshold": GRASP_REACH_THRESHOLD,
             "gripper_closed_threshold": GRIPPER_CLOSED_THRESHOLD,
-            "ee_cfg": SceneEntityCfg("robot", body_names="end_effector"),
+            "ee_cfg": SceneEntityCfg("robot", body_names="link_005"),
             "gripper_cfg": SceneEntityCfg("robot", joint_names=[EGGTART_GRIPPER_JOINT_NAME]),
             "target_cfg": SceneEntityCfg("target"),
             "grasp_offset": EGGTART_EE_GRASP_OFFSET,
         },
     )
-    # 阶段 4: 抓取后回收
-    retract = RewTerm(
-        func=mdp.retract_bonus,
-        weight=2.0,
+
+    # 引导奖励：接近且闭合时鼓励提起末端（稠密奖励，完整动作序列）
+    ee_lift_guide = RewTerm(
+        func=mdp.ee_lift_when_near,
+        weight=5.0,  # 提高权重：让"提起"的吸引力 > "不闭合"的惩罚
         params={
             "reach_threshold": GRASP_REACH_THRESHOLD,
             "gripper_closed_threshold": GRIPPER_CLOSED_THRESHOLD,
-            "std": 0.5,
-            "arm_cfg": SceneEntityCfg("robot", joint_names=EGGTART_ARM_JOINT_NAMES),
-            "ee_cfg": SceneEntityCfg("robot", body_names="end_effector"),
+            "lift_height_target": LIFT_HEIGHT_THRESHOLD,
+            "ee_cfg": SceneEntityCfg("robot", body_names="link_005"),
             "gripper_cfg": SceneEntityCfg("robot", joint_names=[EGGTART_GRIPPER_JOINT_NAME]),
             "target_cfg": SceneEntityCfg("target"),
             "grasp_offset": EGGTART_EE_GRASP_OFFSET,
+        },
+    )
+
+    # 稀疏抓取奖励（基于提起高度判定，不再依赖夹爪角度）
+    # 目标必须被提起到指定高度并保持一段时间才算成功抓取
+    grasp = RewTerm(
+        func=mdp.grasp_bonus_lift,
+        weight=10.0,  # 提高权重，因为这是真正的任务目标
+        params={
+            "lift_height_threshold": LIFT_HEIGHT_THRESHOLD,
+            "lift_dwell_time": LIFT_DWELL_TIME,
+            "target_cfg": SceneEntityCfg("target"),
+        },
+    )
+
+    # 阶段 4: 抓取后回收（基于提起高度判定）
+    retract = RewTerm(
+        func=mdp.retract_bonus_lift,
+        weight=2.0,
+        params={
+            "lift_height_threshold": LIFT_HEIGHT_THRESHOLD,
+            "std": 0.5,
+            "arm_cfg": SceneEntityCfg("robot", joint_names=EGGTART_ARM_JOINT_NAMES),
+            "target_cfg": SceneEntityCfg("target"),
         },
     )
     # 惩罚项
@@ -346,7 +374,7 @@ class RewardsCfg:
     # action_rate 管指令的跳变，joint_vel 管真实的高频运动。
     joint_vel = RewTerm(
         func=mdp.joint_vel_l2,
-        weight=-0.002,
+        weight=-0.005,
         params={
             "asset_cfg": SceneEntityCfg(
                 "robot", joint_names=EGGTART_ARM_JOINT_NAMES + [EGGTART_GRIPPER_JOINT_NAME]
@@ -417,49 +445,56 @@ class CurriculumCfg:
     )
     base_facing_sched = CurrTerm(
         func=mdp.reward_weight_schedule,
-        params={"term_name": "base_facing", "schedule": [(0, 1.0)]},
+        params={"term_name": "base_facing", "schedule": [(0, 1.2)]},
     )
-    # 末端执行器：阶段 2 打开（提前到iter 250，让EE更早开始学习）
+    # 末端执行器：阶段 2 打开
     ee_reach_sched = CurrTerm(
         func=mdp.reward_weight_schedule,
-        params={"term_name": "ee_reach", "schedule": [(0, 0.0), (9000, 5.0)]},  # 9000步≈iter 375，权重5.0加大引导
+        params={"term_name": "ee_reach", "schedule": [(0, 0.0), (9000, 3.0)]},
     )
     ee_distance_sched = CurrTerm(
         func=mdp.reward_weight_schedule,
-        params={"term_name": "ee_distance", "schedule": [(0, 0.0), (9000, -0.2)]},
+        params={"term_name": "ee_distance", "schedule": [(0, 0.0), (9000, -0.5)]},
     )
-
-    # 引导奖励：在ee_reach之后、grasp之前启用，帮助policy学会"接近->闭合"
+    # 抓取：阶段 3 打开
+    # 引导
     gripper_close_guide_sched = CurrTerm(
         func=mdp.reward_weight_schedule,
-        params={"term_name": "gripper_close_guide", "schedule": [(0, 0.0), (9000, 2.0)]}, 
+        params={"term_name": "gripper_close_guide", "schedule": [(0, 0.0), (16000, -1.5)]},
     )
-
-    # 抓取和回收：阶段 3 打开（提前到iter 500）
-    grasp_sched = CurrTerm(
+    ee_lift_guide_sched = CurrTerm(
         func=mdp.reward_weight_schedule,
-        params={"term_name": "grasp", "schedule": [(0, 0.0), (12000, 10.0)]},  # 12000步≈iter 500，权重10.0让grasp更有吸引力
+        params={"term_name": "ee_lift_guide", "schedule": [(0, 0.0), (16000, 5.0)]},
     )
     # "提前闭爪"的惩罚和 grasp 同步打开，但权重降低避免过度抑制
     gripper_early_sched = CurrTerm(
         func=mdp.reward_weight_schedule,
-        params={"term_name": "gripper_early", "schedule": [(0, 0.0), (12000, -0.005)]},  # 降到-0.005，让policy敢尝试夹
+        params={"term_name": "gripper_early", "schedule": [(0, 0.0), (16000, -0.5)]},
     )
+    # 使用基于提起高度的判定
+    grasp_sched = CurrTerm(
+        func=mdp.reward_weight_schedule,
+        params={"term_name": "grasp", "schedule": [(0, 0.0), (16000, 10.0)]},
+    )
+    
+    # 
     retract_sched = CurrTerm(
         func=mdp.reward_weight_schedule,
-        params={"term_name": "retract", "schedule": [(0, 0.0), (30000, 2.0)]},
+        params={"term_name": "retract", "schedule": [(0, 0.0), (24000, 2.0)]},
     )
-    # 底盘速度惩罚：延后到 step 3000（≈iter 125）再打开。
-    # 一开始底盘还不会走，就罚它动会拖慢学习；等它大致学会接近了再要求"停住"。
-    base_vel_sched = CurrTerm(
-        func=mdp.reward_weight_schedule,
-        params={"term_name": "base_vel", "schedule": [(0, 0.0), (9000, -0.05)]},
-    )
+
+    # 
     # 关节限位惩罚全程开启：从一开始就不该往限位上顶
     joint_limits_sched = CurrTerm(
         func=mdp.reward_weight_schedule,
         params={"term_name": "joint_limits", "schedule": [(0, -0.5)]},
     )
+    # 底盘速度惩罚： 一开始底盘还不会走，就罚它动会拖慢学习；等它大致学会接近了再要求"停住"。
+    base_vel_sched = CurrTerm(
+        func=mdp.reward_weight_schedule,
+        params={"term_name": "base_vel", "schedule": [(0, 0.0), (9000, -0.5)]},
+    )
+    
 
 @configclass
 class TerminationsCfg:
@@ -474,7 +509,7 @@ class TerminationsCfg:
 ##
 @configclass
 class MobileGraspEnvCfg(ManagerBasedRLEnvCfg):
-    """Eggtart 移动抓取环境的基础配置"""
+    """Eggtart 移动抓取环境的基础配置（带移动目标）"""
 
     # 场景
     scene: MobileGraspSceneCfg = MobileGraspSceneCfg(num_envs=2048, env_spacing=3.0)
@@ -494,3 +529,22 @@ class MobileGraspEnvCfg(ManagerBasedRLEnvCfg):
         self.viewer.eye = (4.0, 4.0, 3.0)
         # 仿真设置
         self.sim.dt = 1.0 / 120.0
+
+
+@configclass
+class MobileGraspEnvStaticCfg(MobileGraspEnvCfg):
+    """Eggtart 移动抓取环境配置（静止目标版本）
+
+    继承基础配置，但禁用目标的随机移动：
+    - 初始速度设为 0
+    - 禁用周期性速度随机化（通过设置超长间隔）
+    """
+
+    def __post_init__(self):
+        super().__post_init__()
+
+        # 覆盖目标初始速度为 0（静止）
+        self.events.reset_target.params["velocity_range"] = {"x": (0.0, 0.0), "y": (0.0, 0.0)}
+
+        # 禁用周期性速度随机化：设置超长间隔（1小时），实际episode只有10秒
+        self.events.randomize_target_velocity.interval_range_s = (3600.0, 3600.0)
