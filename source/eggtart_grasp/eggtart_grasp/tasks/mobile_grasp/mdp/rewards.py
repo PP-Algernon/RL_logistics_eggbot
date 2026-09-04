@@ -634,9 +634,11 @@ def gripper_close_when_near(
     """
     robot: Articulation = env.scene[ee_cfg.name]
 
-    # 距离门控：只在接近时才惩罚不闭合
+    # 距离门控：扩大感受野，使用更平缓的衰减
     dist = _ee_to_target_distance(env, ee_cfg, target_cfg, grasp_offset)
-    proximity = torch.exp(-torch.square(dist / (reach_threshold * 0.5)))
+    # 改为线性门控 + clip，而非窄高斯核
+    # 在 reach_threshold 内线性衰减：0m→1.0, reach_threshold→0.0
+    proximity = torch.clamp(1.0 - dist / reach_threshold, 0.0, 1.0)
 
     # 张开程度归一化到 [0, 1]：full_close -> 0 (不惩罚)，open -> 1 (最大惩罚)
     gripper_pos = robot.data.joint_pos[:, gripper_cfg.joint_ids[0]]
@@ -865,3 +867,76 @@ def arm_comfort(
     # 高斯核奖励：偏离 0 时为 1，偏离越大越小
     reward = torch.exp(-0.5 * (error / std) ** 2)
     return reward
+
+
+def grasp_posture_guide(
+    env: ManagerBasedRLEnv,
+    target_joint_pos: dict[str, float],
+    std: float,
+    reach_threshold: float,
+    arm_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
+    ee_cfg: SceneEntityCfg = SceneEntityCfg("robot", body_names="link_005"),
+    target_cfg: SceneEntityCfg = SceneEntityCfg("target"),
+    grasp_offset: tuple[float, float, float] | None = None,
+) -> torch.Tensor:
+    """当末端接近目标时，引导机械臂采用特定的抓取姿态
+
+    只有在末端接近目标（距离 < reach_threshold）时才激活，避免在底盘导航阶段干扰。
+    使用高斯核奖励偏离目标姿态的程度，鼓励策略在抓取前摆出"容易成功"的姿态。
+
+    **与 arm_comfort 的区别**：
+    - arm_comfort: 全程开启，鼓励保持 nominal（收起）姿态，避免过度伸展
+    - grasp_posture_guide: 只在接近目标时开启，鼓励切换到抓取（伸展）姿态
+
+    典型用法：
+        grasp_posture_guide_sched = CurrTerm(
+            func=mdp.reward_weight_schedule,
+            params={"term_name": "grasp_posture_guide", "schedule": [(0, 0.0), (30000, 2.0)]},
+        )
+
+    Args:
+        env: 环境实例
+        target_joint_pos: 目标关节角度字典（来自 EGGTART_GRASP_JOINT_POS）
+        std: 高斯核标准差（弧度），偏离多少算可接受
+        reach_threshold: 距离阈值（米），末端在此距离内才激活
+        arm_cfg: 机械臂实体配置
+        ee_cfg: 末端执行器实体配置
+        target_cfg: 目标物体实体配置
+        grasp_offset: 抓取点偏移
+
+    Returns:
+        shape (num_envs,) 的奖励，范围 [0, 1]
+        - 姿态完全匹配且接近目标 -> 1.0
+        - 姿态偏离或距离远 -> 0.0
+    """
+    robot: Articulation = env.scene[arm_cfg.name]
+
+    # 距离门控：只在接近目标时才激活
+    dist = _ee_to_target_distance(env, ee_cfg, target_cfg, grasp_offset)
+    proximity = torch.clamp(1.0 - dist / reach_threshold, 0.0, 1.0)
+
+    # 提取机械臂关节（排除夹爪和轮子）
+    arm_joint_ids = arm_cfg.joint_ids
+    current_pos = robot.data.joint_pos[:, arm_joint_ids]
+
+    # 构建目标姿态张量（只包含机械臂关节）
+    target_pos_list = []
+    for joint_name in arm_cfg.joint_names:
+        if joint_name in target_joint_pos:
+            target_pos_list.append(target_joint_pos[joint_name])
+        else:
+            # 如果没有指定，使用当前 nominal 值（fallback）
+            target_pos_list.append(robot.data.default_joint_pos[0, robot.find_joints(joint_name)[0][0]].item())
+
+    target_pos = torch.tensor(target_pos_list, device=env.device, dtype=torch.float32)
+    target_pos = target_pos.unsqueeze(0).expand(env.num_envs, -1)
+
+    # 计算姿态误差（L2 norm）
+    error = torch.norm(current_pos - target_pos, dim=1)
+
+    # 高斯核奖励：error=0 -> 1.0, error=std -> 0.6, error=2*std -> 0.14
+    posture_reward = torch.exp(-0.5 * torch.square(error / std))
+
+    # 只在接近目标时才给奖励
+    return proximity * posture_reward
+

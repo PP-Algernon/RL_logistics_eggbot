@@ -95,7 +95,7 @@ EGGTART_URDF_PATH = os.path.join(_THIS_DIR, "urdf", "robot.urdf")
 # 注意 CLOSED = -0.2 正好压在下限上：任何"要求夹爪角度低于 -0.2"的判据都不可能成立
 # （见 mobile_grasp_env_cfg.py 里 GRIPPER_CLOSED_THRESHOLD 的说明）。
 EGGTART_GRIPPER_OPEN = 1.0
-EGGTART_GRIPPER_CLOSED = -0.2  # = 硬下限，闭到底
+EGGTART_GRIPPER_CLOSED = 0.05  # = 硬下限，闭到底
 
 # **重要**：nominal 姿态必须落在软限位（0.95 × 硬限位）之内，否则 joint_pos_limits
 # 惩罚项在默认姿态下就恒为正，机械臂被持续往内推，和任务奖励对抗。
@@ -114,6 +114,15 @@ EGGTART_NOMINAL_JOINT_POS = {
     "wheel_.*_joint": 0.0,
 }
 
+EGGTART_GRASP_JOINT_POS = {
+    "link_001_joint": 0.0,      # soft (-1.491, +1.491)，
+    "link_002_joint": -2.86,    # soft (-3.822, -0.098)，
+    "link_003_joint": 1.76,     # soft (+0.079, +3.061)，
+    "link_004_joint": -0.77,    # soft (-3.061, -0.079)，
+    "link_005_joint": 0.0,      # soft (-1.491, +1.491)，
+    "end_effector_joint": EGGTART_GRIPPER_CLOSED,  # soft (-0.156, +1.526)
+    "wheel_.*_joint": 0.0,
+}
 # ---------------------------------------------------------------------------
 # ArticulationCfg
 # ---------------------------------------------------------------------------

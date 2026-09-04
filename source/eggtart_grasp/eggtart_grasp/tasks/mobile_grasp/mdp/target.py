@@ -27,15 +27,15 @@ def randomize_target_velocity(
     env_ids: torch.Tensor,
     velocity_range: dict[str, tuple[float, float]],
     asset_cfg: SceneEntityCfg = SceneEntityCfg("target"),
-    stage2_start_step: int = 24000,   # 阶段2开始
-    stage3_start_step: int = 36000,  # 阶段3开始
+    stage2_start_step: int = 64000,   # 阶段2开始
+    stage3_start_step: int = 120000,  # 阶段3开始
 ) -> None:
     """Set a new random horizontal velocity on the target for the given envs.
 
     逆向课程学习集成：
-    - 阶段1 (step < 24000):  随机速度（与 target_approach 配合）
-    - 阶段2 (24000 <= step < 36000): 目标静止
-    - 阶段3 (step >= 36000): 恢复随机速度
+    - 阶段1 (step < 64000):  随机速度（与 target_approach 配合）
+    - 阶段2 (64000 <= step < 120000): 目标静止
+    - 阶段3 (step >= 120000): 恢复随机速度
 
     ``velocity_range`` maps axis name ("x", "y") to a (min, max) range in m/s. Unspecified axes
     are set to zero. Designed to be used as an ``interval`` event so the target changes heading
@@ -82,7 +82,7 @@ def target_approach_ee_direction(
     ee_cfg: SceneEntityCfg = SceneEntityCfg("robot", body_names="link_005"),
     grasp_offset: tuple[float, float, float] | None = None,
     direction_offset: tuple[float, float, float] | None = None,
-    stage1_end_step: int = 16000,
+    stage1_end_step: int = 64000,
 ) -> None:
     """逆向课程学习：目标主动缓慢靠近末端方向点（阶段1辅助学习）
 
@@ -96,7 +96,7 @@ def target_approach_ee_direction(
         - approach_speed = 0.05       # 目标以5cm/s缓慢靠近
         - grasp_offset = EGGTART_EE_GRASP_OFFSET
         - direction_offset = EGGTART_EE_GRASP_DERECT_OFFSET
-        - stage1_end_step = 16000    # 阶段1结束步数
+        - stage1_end_step = 64000    # 阶段1结束步数
 
     Args:
         env: 环境实例

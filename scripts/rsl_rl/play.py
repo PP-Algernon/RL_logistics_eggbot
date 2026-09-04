@@ -111,15 +111,15 @@ def main():
         print(f"[INFO] 手动设置逆课程学习阶段: {stage}")
 
         # 映射阶段到 common_step_counter（模拟训练时的阶段切换逻辑）
-        # 阶段1: step < 24000,  阶段2: 24000 <= step < 36000,  阶段3: step >= 36000
+        # 阶段1: step < 64000,  阶段2: 64000 <= step < 120000,  阶段3: step >= 120000
         if stage == 1:
             env.unwrapped.common_step_counter = 0  # 阶段1开始
             print("  → 目标会主动靠近末端方向点（当抓取点接近时）")
         elif stage == 2:
-            env.unwrapped.common_step_counter = 24000  # 阶段2开始
+            env.unwrapped.common_step_counter = 64000  # 阶段2开始
             print("  → 目标保持静止")
         elif stage == 3:
-            env.unwrapped.common_step_counter = 36000  # 阶段3开始
+            env.unwrapped.common_step_counter = 120000  # 阶段3开始
             print("  → 目标恢复随机移动")
 
         # 锁定 common_step_counter，防止在回放过程中自动递增导致阶段切换
