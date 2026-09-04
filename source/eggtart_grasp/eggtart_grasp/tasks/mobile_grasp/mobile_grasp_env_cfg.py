@@ -40,12 +40,13 @@ from eggtart_grasp.assets.eggtart import (
 # Tunable task constants
 # ---------------------------------------------------------------------------
 # 抓取成功判定：目标物体被提起到的高度阈值
-# 目标初始生成高度在地面附近(0.015-0.020 m)，这里要求提升到至少 0.35 m 算成功抓取
-LIFT_HEIGHT_THRESHOLD = 0.35  # m (目标质心高度)
+# 目标初始生成高度在地面附近(0.015-0.020 m)，降低门槛让策略更容易获得正反馈
+# 从地面（0.015m）提升 10cm（到 0.115m）就算成功，鼓励探索
+LIFT_HEIGHT_THRESHOLD = 0.12  # m (目标质心高度，降低到 12cm)
 
 # 提起后必须保持在高度阈值以上这么久才算稳定抓取
-# 避免"瞬间碰到就给分"，要求真正夹住并保持
-LIFT_DWELL_TIME = 0.3  # s
+# 降低到 0.1s（约 3 步），避免"碰一下就掉"但不要求太久
+LIFT_DWELL_TIME = 0.1  # s
 
 # 目标移动速度范围（用于随机初始速度和周期性速度变化）
 TARGET_VELOCITY_RANGE = 0.10  # m/s (±range，降低到原来的40%)
@@ -311,7 +312,7 @@ class RewardsCfg:
     # 夹爪朝向对准目标（夹持方向应该指向目标）
     ee_orientation = RewTerm(
         func=mdp.ee_grasp_direction_alignment,
-        weight=1.5,
+        weight=2.5,
         params={
             "std": 0.5,  # 角度容差约 30 度
             "ee_cfg": SceneEntityCfg("robot", body_names="link_005"),
@@ -390,17 +391,22 @@ class RewardsCfg:
         },
     )
 
-    # 阶段 4: 抓取后回收（基于提起高度判定）
-    retract = RewTerm(
-        func=mdp.retract_bonus_lift,
-        weight=2.0,
+    # 渐进式目标提升奖励：提供密集梯度，在稀疏的 grasp 之前引导策略探索
+    # 目标提升得越高，奖励越多（高斯核平滑），不是二值的 0/1
+    # 重要：使用渐进式闭合门控，防止"推目标"欺骗行为的同时提供密集梯度
+    target_lift_progress = RewTerm(
+        func=mdp.target_lift_progress,
+        weight=20.0,  # 高权重，提供强烈的提升信号
         params={
-            "lift_height_threshold": LIFT_HEIGHT_THRESHOLD,
-            "std": 0.5,
-            "arm_cfg": SceneEntityCfg("robot", joint_names=EGGTART_ARM_JOINT_NAMES),
+            "target_height": LIFT_HEIGHT_THRESHOLD,  # 提到门槛高度时奖励最大
+            "std": 0.05,  # 5cm 的平滑窗口
             "target_cfg": SceneEntityCfg("target"),
+            "gripper_cfg": SceneEntityCfg("robot", joint_names=[EGGTART_GRIPPER_JOINT_NAME]),
+            "gripper_closed_threshold": GRIPPER_CLOSED_THRESHOLD,
+            "gripper_open_pos": 0.05,  # 夹爪完全张开位置
         },
     )
+
     # 惩罚项
     # 机械臂舒适度：鼓励关节保持接近 nominal 姿态
     # 全程开启，引导底盘停在"让机械臂舒服工作"的位置，避免为了缩短末端距离而让机械臂扭曲
@@ -420,8 +426,8 @@ class RewardsCfg:
         weight=2.0,  # 正奖励，接近目标时摆出抓取姿态
         params={
             "target_joint_pos": EGGTART_GRASP_JOINT_POS,  # 目标抓取姿态
-            "std": 0.5,  # 偏离 0.5 rad（28°）时奖励降到 0.6
-            "reach_threshold": GRASP_REACH_THRESHOLD * 2,  # 距离 <10cm 时激活（放宽到阈值的2倍）
+            "std": 1.0,  # 0.5→1.0，放宽容差（偏离 1 rad 时仍有 0.6 奖励）
+            "reach_threshold": GRASP_REACH_THRESHOLD * 3,  # 2→3，距离 <15cm 时激活（进一步放宽）
             "arm_cfg": SceneEntityCfg("robot", joint_names=EGGTART_ARM_JOINT_NAMES),
             "ee_cfg": SceneEntityCfg("robot", body_names="link_005"),
             "target_cfg": SceneEntityCfg("target"),
@@ -531,7 +537,7 @@ class CurriculumCfg:
     )
     ee_orientation_sched = CurrTerm(
         func=mdp.reward_weight_schedule,
-        params={"term_name": "ee_orientation", "schedule": [(0, 0.0), (36000, 1.5)]},  # 延后到 36000，先让末端靠近再管朝向
+        params={"term_name": "ee_orientation", "schedule": [(0, 0.0), (36000, 2.5)]},  # 延后到 36000，先让末端靠近再管朝向
     )
 
     # 抓取：阶段 3 打开（36000 步 = 1500 迭代后，确保底盘+末端协同已稳定）
@@ -556,11 +562,10 @@ class CurriculumCfg:
         params={"term_name": "grasp", "schedule": [(0, 0.0), (48000, 30.0)]},  # 15.0→30.0，大幅提高
     )
 
-    #
-    # 回收奖励：用于鼓励机器人将物体收回至指定位置
-    retract_sched = CurrTerm(
+    # 渐进式提升奖励：比稀疏奖励更早激活，提供密集引导
+    target_lift_progress_sched = CurrTerm(
         func=mdp.reward_weight_schedule,
-        params={"term_name": "retract", "schedule": [(0, 0.0), (50000, 2.0)]},  # 30000→48000
+        params={"term_name": "target_lift_progress", "schedule": [(0, 0.0), (36000, 20.0)]},  # 阶段3开始
     )
 
     # 机械臂舒适度：全程开启，从一开始就引导底盘停在让机械臂舒服的位置
@@ -573,7 +578,7 @@ class CurriculumCfg:
     # 抓取姿态引导：阶段2开始激活，引导机械臂在接近目标时摆出正确姿态
     grasp_posture_guide_sched = CurrTerm(
         func=mdp.reward_weight_schedule,
-        params={"term_name": "grasp_posture_guide", "schedule": [(0, 0.0), (30000, 4.0)]},  # 2.0→4.0，提高权重
+        params={"term_name": "grasp_posture_guide", "schedule": [(0, 0.0), (30000, 8.0)]},  # 4.0→8.0，进一步提高
     )
 
     # 关节限位惩罚全程开启：从一开始就不该往限位上顶

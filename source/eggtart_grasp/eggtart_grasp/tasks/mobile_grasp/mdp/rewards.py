@@ -471,8 +471,20 @@ def ee_grasp_direction_alignment(
     # 转换为角度误差（弧度）
     angle_error = torch.acos(torch.clamp(alignment, -1.0, 1.0))
 
-    # 高斯核奖励
-    return torch.exp(-torch.square(angle_error / std))
+    # 基础对齐奖励（高斯核）
+    base_reward = torch.exp(-torch.square(angle_error / std))
+
+    # 额外奖励：倾向于从上至下（夹持方向应有向下分量）
+    # grasp_dir 的 Z 分量：负值表示向下，正值表示向上
+    downward_component = -grasp_dir[:, 2]  # 取负号，让向下为正
+    # 归一化到 [0, 1]：完全向下=1.0，水平=0.5，完全向上=0.0
+    downward_bias = torch.clamp(downward_component * 0.5 + 0.5, 0.0, 1.0)
+
+    # 组合：基础对齐 × (1 + 向下偏好)，让从上方对准的姿态获得更高奖励
+    # 从上方对准：base_reward=1.0, downward_bias=0.8 → 1.0 × 1.8 = 1.8
+    # 从侧面对准：base_reward=1.0, downward_bias=0.5 → 1.0 × 1.5 = 1.5
+    # 从下方对准：base_reward=1.0, downward_bias=0.2 → 1.0 × 1.2 = 1.2
+    return base_reward * (1.0 + downward_bias)
 
 
 class grasp_bonus_dwell(ManagerTermBase):
@@ -939,4 +951,81 @@ def grasp_posture_guide(
 
     # 只在接近目标时才给奖励
     return proximity * posture_reward
+
+
+def target_lift_progress(
+    env: ManagerBasedRLEnv,
+    target_cfg: SceneEntityCfg = SceneEntityCfg("target"),
+    gripper_cfg: SceneEntityCfg = SceneEntityCfg("robot", joint_names=["end_effector_joint"]),
+    target_height: float = 0.12,
+    std: float = 0.05,
+    gripper_closed_threshold: float = 0.35,
+    gripper_open_pos: float = 0.05,
+) -> torch.Tensor:
+    """渐进式目标提升奖励：目标物体提得越高，奖励越多（需要夹爪闭合）
+
+    **重要修改**：使用渐进式闭合门控（连续值），而非二值门控。
+    防止"推目标"欺骗行为的同时，提供密集梯度引导夹爪逐渐闭合。
+
+    不是二值的 0/1 稀疏奖励，而是高斯核平滑奖励，提供密集梯度。
+    与 grasp_bonus_lift（稀疏奖励）互补：这个提供探索期的引导，那个提供成功时的大奖。
+
+    典型用法：
+        target_lift_progress = RewTerm(
+            func=mdp.target_lift_progress,
+            weight=20.0,
+            params={
+                "target_height": 0.12,
+                "std": 0.05,
+                "target_cfg": SceneEntityCfg("target"),
+                "gripper_cfg": SceneEntityCfg("robot", joint_names=[EGGTART_GRIPPER_JOINT_NAME]),
+                "gripper_closed_threshold": GRIPPER_CLOSED_THRESHOLD,
+                "gripper_open_pos": 0.05,
+            },
+        )
+
+    Args:
+        env: 环境实例
+        target_cfg: 目标物体配置
+        gripper_cfg: 夹爪关节配置
+        target_height: 目标高度（m），提到此高度时奖励最大
+        std: 高斯核标准差（m），控制奖励的平滑度
+        gripper_closed_threshold: 夹爪闭合阈值，小于此值算完全闭合
+        gripper_open_pos: 夹爪完全张开位置
+
+    Returns:
+        奖励张量，夹爪闭合度 × 提升奖励，范围 [0, 1]
+        - 完全张开 → 0（无奖励）
+        - 闭合一半 → 0.5×提升奖励
+        - 完全闭合且提到目标高度 → 1.0
+    """
+    robot: Articulation = env.scene[gripper_cfg.name]
+    target: RigidObject = env.scene[target_cfg.name]
+
+    # 渐进式门控：夹爪闭合度（连续值 0~1，提供密集梯度）
+    gripper_pos = robot.data.joint_pos[:, gripper_cfg.joint_ids[0]]
+    span = gripper_open_pos - gripper_closed_threshold  # 张开到闭合的行程
+    gripper_closure = torch.clamp((gripper_open_pos - gripper_pos) / span, 0.0, 1.0)
+    # gripper_closure = 0: 完全张开，无奖励
+    # gripper_closure = 0.5: 闭合一半，奖励减半
+    # gripper_closure = 1.0: 完全闭合，全额奖励
+
+    current_height = target.data.root_pos_w[:, 2]
+
+    # 地面高度（目标初始在地面约 0.015-0.020m）
+    ground_height = 0.015
+
+    # 提升量
+    lift_amount = current_height - ground_height
+
+    # 高斯核：提到 target_height 时最大（1.0），远离时平滑衰减
+    # exp(-0.5 * ((lift - target) / std)^2)
+    reward = torch.exp(-0.5 * torch.square((lift_amount - target_height) / std))
+
+    # 如果提升量太小（<5mm，仍在地面），不给奖励
+    reward = torch.where(lift_amount > 0.005, reward, torch.zeros_like(reward))
+
+    # 渐进式门控：夹爪闭合越多，奖励越大（提供密集梯度）
+    return gripper_closure * reward
+
 
