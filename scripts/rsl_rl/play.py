@@ -116,10 +116,10 @@ def main():
             env.unwrapped.common_step_counter = 0  # 阶段1开始
             print("  → 目标会主动靠近末端方向点（当抓取点接近时）")
         elif stage == 2:
-            env.unwrapped.common_step_counter = 64000  # 阶段2开始
+            env.unwrapped.common_step_counter = 36000  # 阶段2开始
             print("  → 目标保持静止")
         elif stage == 3:
-            env.unwrapped.common_step_counter = 120000  # 阶段3开始
+            env.unwrapped.common_step_counter = 96000  # 阶段3开始
             print("  → 目标恢复随机移动")
 
         # 锁定 common_step_counter，防止在回放过程中自动递增导致阶段切换

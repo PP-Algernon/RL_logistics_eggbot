@@ -578,12 +578,16 @@ def gripper_premature_close(
     gripper_cfg: SceneEntityCfg = SceneEntityCfg("robot", joint_names=["end_effector_joint"]),
     target_cfg: SceneEntityCfg = SceneEntityCfg("target"),
     grasp_offset: tuple[float, float, float] | None = None,
+    lift_threshold: float = 0.03,  # 目标抬起3cm以上就不惩罚
 ) -> torch.Tensor:
     """惩罚"还没到位就闭爪"（治夹爪夹早了）
 
     只加停留计时是"不给奖励"，属于消极约束——提前闭爪虽然拿不到分，但也不亏，
     策略仍可能保持闭爪的习惯（尤其闭爪几乎不花动作代价）。本项主动给它记上一笔：
     抓取点还在 reach_threshold **之外**、夹爪却是闭合的，就返回 1。
+
+    **重要修改**：增加"目标被抓起"门控。如果目标已经被抬起（说明抓取成功了），
+    则不再惩罚闭爪行为。这样在提起物体后，机械臂可以自由调整姿态而不受惩罚。
 
     配负权重使用。这样"张着爪接近、到位稳住后再闭合"才是最优策略。
 
@@ -595,16 +599,30 @@ def gripper_premature_close(
         gripper_cfg: 夹爪关节实体配置
         target_cfg: 目标物体实体配置
         grasp_offset: 抓取点相对 end_effector body 原点的偏移（局部系）
+        lift_threshold: 目标抬起多高时不再惩罚（米），默认3cm
 
     Returns:
         shape (num_envs,) 的**非负**惩罚量（0 或 1），在 env-cfg 里配负权重
     """
     robot: Articulation = env.scene[ee_cfg.name]
+    target: RigidObject = env.scene[target_cfg.name]
+
     dist = _ee_to_target_distance(env, ee_cfg, target_cfg, grasp_offset)
     gripper_pos = robot.data.joint_pos[:, gripper_cfg.joint_ids[0]]
+
+    # 判断目标是否被抬起（相对地面高度）
+    ground_height = 0.015  # 目标在地面时的高度
+    target_height = target.data.root_pos_w[:, 2]
+    is_lifted = (target_height - ground_height) > lift_threshold
+
+    # 原逻辑：远离目标 + 夹爪闭合 → 惩罚
     is_far = dist >= reach_threshold
     is_closed = gripper_pos < gripper_closed_threshold
-    return (is_far & is_closed).float()
+
+    # 新增门控：如果目标已被抬起，不惩罚
+    penalty = (is_far & is_closed & ~is_lifted).float()
+
+    return penalty
 
 
 def gripper_close_when_near(
@@ -658,6 +676,49 @@ def gripper_close_when_near(
     open_amount = torch.clamp((gripper_pos - gripper_full_close_pos) / span, 0.0, 1.0)
 
     return proximity * open_amount
+
+
+def gripper_closure_bonus(
+    env: ManagerBasedRLEnv,
+    reach_threshold: float,
+    ee_cfg: SceneEntityCfg = SceneEntityCfg("robot", body_names="end_effector"),
+    gripper_cfg: SceneEntityCfg = SceneEntityCfg("robot", joint_names=["end_effector_joint"]),
+    target_cfg: SceneEntityCfg = SceneEntityCfg("target"),
+    grasp_offset: tuple[float, float, float] | None = None,
+    gripper_open_pos: float = 1.0,
+    gripper_full_close_pos: float = 0.05,
+) -> torch.Tensor:
+    """正向奖励：接近目标时闭合夹爪（配合正权重使用）
+
+    这是 gripper_close_when_near 的反向版本，用于鼓励而非惩罚。
+    当机器人接近目标并闭合夹爪时给予奖励，无任何惩罚。
+
+    Args:
+        env: 环境实例
+        reach_threshold: 距离阈值（米），在这个距离内算"接近"
+        ee_cfg, gripper_cfg, target_cfg: 实体配置
+        grasp_offset: 抓取点相对 end_effector body 原点的偏移
+        gripper_open_pos: 夹爪完全张开的关节角
+        gripper_full_close_pos: 视为"完全闭合"的关节角
+
+    Returns:
+        shape (num_envs,)，范围 [0, 1]，配合正权重使用
+        - 接近目标 且 夹爪闭合 -> 1.0 (最大奖励)
+        - 接近目标 且 夹爪打开 -> 0.0 (无奖励)
+        - 远离目标 -> 0.0 (无奖励)
+    """
+    robot: Articulation = env.scene[ee_cfg.name]
+
+    # 距离门控
+    dist = _ee_to_target_distance(env, ee_cfg, target_cfg, grasp_offset)
+    proximity = torch.clamp(1.0 - dist / reach_threshold, 0.0, 1.0)
+
+    # 闭合程度归一化到 [0, 1]：full_close -> 1 (最大奖励)，open -> 0 (无奖励)
+    gripper_pos = robot.data.joint_pos[:, gripper_cfg.joint_ids[0]]
+    span = max(gripper_open_pos - gripper_full_close_pos, 1e-6)
+    close_amount = torch.clamp(1.0 - (gripper_pos - gripper_full_close_pos) / span, 0.0, 1.0)
+
+    return proximity * close_amount
 
 
 def ee_lift_when_near(
@@ -951,6 +1012,87 @@ def grasp_posture_guide(
 
     # 只在接近目标时才给奖励
     return proximity * posture_reward
+
+
+def gripper_holding_object(
+    env: ManagerBasedRLEnv,
+    gripper_cfg: SceneEntityCfg = SceneEntityCfg("robot", joint_names=["end_effector_joint"]),
+    target_cfg: SceneEntityCfg = SceneEntityCfg("target"),
+    ee_cfg: SceneEntityCfg = SceneEntityCfg("robot", body_names="end_effector"),
+    grasp_offset: tuple[float, float, float] | None = None,
+    pos_min: float = 0.18,
+    pos_max: float = 0.32,
+    effort_threshold: float = 0.1,
+    distance_threshold: float = 0.07,
+) -> torch.Tensor:
+    """检测夹爪是否真正夹住物体（力控夹爪专用）
+
+    力控夹爪的关键特征：
+    - 位置：gripper_pos 停在 0.18-0.32（被物体挡住）
+    - 力矩：正在施加闭合力矩（effort_target > threshold 或 applied_torque > threshold）
+    - **距离门控**：夹爪必须接近目标（< 7cm）才计入奖励
+
+    Args:
+        env: 环境实例
+        gripper_cfg: 夹爪关节配置
+        target_cfg: 目标物体配置
+        ee_cfg: 末端执行器配置
+        grasp_offset: 抓取点偏移
+        pos_min: 夹住物体时的最小位置（弧度）
+        pos_max: 夹住物体时的最大位置（弧度）
+        effort_threshold: 力矩阈值（Nm），绝对值大于此值算"正在施力"
+        distance_threshold: 距离阈值（米），夹爪必须在此距离内才给奖励
+
+    Returns:
+        shape (num_envs,) 的奖励，范围 [0, 1]
+        - 位置在范围内 且 正在施加力 且 接近目标 -> 1.0
+        - 否则 -> 0.0
+    """
+    robot: Articulation = env.scene[gripper_cfg.name]
+    target: RigidObject = env.scene[target_cfg.name]
+
+    gripper_joint_idx = gripper_cfg.joint_ids[0]
+
+    # 0. 距离门控：夹爪必须接近目标
+    from isaaclab.utils.math import quat_apply
+    ee_pos_w = robot.data.body_pos_w[:, ee_cfg.body_ids[0], :]
+    ee_quat_w = robot.data.body_quat_w[:, ee_cfg.body_ids[0], :]
+
+    if grasp_offset is not None:
+        grasp_off = torch.tensor(grasp_offset, device=env.device, dtype=ee_pos_w.dtype)
+        grasp_off = grasp_off.unsqueeze(0).expand(ee_pos_w.shape[0], -1)  # (num_envs, 3)
+        grasp_pos_w = ee_pos_w + quat_apply(ee_quat_w, grasp_off)
+    else:
+        grasp_pos_w = ee_pos_w
+
+    target_pos = target.data.root_pos_w
+    dist = torch.norm(grasp_pos_w - target_pos, dim=1)
+    is_near = dist < distance_threshold
+
+    # 1. 检查夹爪位置：在合理范围内（被物体挡住的位置）
+    gripper_pos = robot.data.joint_pos[:, gripper_joint_idx]
+    pos_in_range = (gripper_pos >= pos_min) & (gripper_pos <= pos_max)
+
+    # 2. 检查夹爪是否正在施加力矩（力控的关键）
+    # 优先使用 applied_torque（实际施加的力矩），fallback 到 joint_effort_target（指令力矩）
+    if robot.data.applied_torque is not None:
+        gripper_effort = robot.data.applied_torque[:, gripper_joint_idx]
+    elif robot.data.joint_effort_target is not None:
+        gripper_effort = robot.data.joint_effort_target[:, gripper_joint_idx]
+    else:
+        # Fallback: 如果没有力矩数据，用速度接近0判断
+        gripper_vel = robot.data.joint_vel[:, gripper_joint_idx]
+        is_applying_force = torch.abs(gripper_vel) < 0.02
+        is_holding = pos_in_range & is_applying_force & is_near
+        return is_holding.float()
+
+    # 力矩绝对值大于阈值，说明正在施力（闭合或张开都算）
+    is_applying_force = torch.abs(gripper_effort) > effort_threshold
+
+    # 3. 组合判断：位置正确 且 正在施力 且 接近目标
+    is_holding = pos_in_range & is_applying_force & is_near
+
+    return is_holding.float()
 
 
 def target_lift_progress(

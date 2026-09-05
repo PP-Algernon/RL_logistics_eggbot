@@ -169,3 +169,80 @@ def target_approach_ee_direction(
         new_vel[active_indices, 2] = 0  # 保持高度
 
     target.write_root_velocity_to_sim(new_vel, env_ids=env_ids)
+
+
+def reset_target_curriculum(
+    env: ManagerBasedRLEnv,
+    env_ids: torch.Tensor,
+    stage1_pose_range: dict[str, tuple[float, float]],
+    stage2_pose_range: dict[str, tuple[float, float]],
+    stage3_pose_range: dict[str, tuple[float, float]],
+    velocity_range: dict[str, tuple[float, float]],
+    asset_cfg: SceneEntityCfg = SceneEntityCfg("target"),
+    robot_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
+    stage2_start_step: int = 36000,
+    stage3_start_step: int = 72000,
+) -> None:
+    """三阶段逆课程学习：根据训练步数选择不同的目标初始位置范围
+
+    所有阶段都使用相对于机器人的坐标系，确保每个并行环境都有独立的目标位置。
+
+    Args:
+        env: 环境实例
+        env_ids: 要重置的环境索引
+        stage1_pose_range: 阶段1位置范围（相对机器人坐标系）
+        stage2_pose_range: 阶段2位置范围（相对机器人坐标系）
+        stage3_pose_range: 阶段3位置范围（相对机器人坐标系）
+        velocity_range: 速度范围（通常设为0，因为有独立的速度控制）
+        asset_cfg: 目标实体配置
+        robot_cfg: 机器人实体配置
+        stage2_start_step: 阶段2开始步数
+        stage3_start_step: 阶段3开始步数
+    """
+    from isaaclab.assets import Articulation
+    from isaaclab.utils.math import quat_apply
+
+    asset: RigidObject = env.scene[asset_cfg.name]
+    robot: Articulation = env.scene[robot_cfg.name]
+
+    if env_ids is None:
+        env_ids = asset._ALL_INDICES  # type: ignore[attr-defined]
+
+    n = len(env_ids)
+    current_step = env.common_step_counter
+
+    # 根据当前步数选择位置范围
+    if current_step < stage2_start_step:
+        pose_range = stage1_pose_range
+    elif current_step < stage3_start_step:
+        pose_range = stage2_pose_range
+    else:
+        pose_range = stage3_pose_range
+
+    # 生成随机位置
+    root_state = asset.data.default_root_state[env_ids].clone()
+
+    # 位置采样（相对于机器人坐标系）
+    position_samples = torch.zeros((n, 3), device=env.device)
+    axis_to_col = {"x": 0, "y": 1, "z": 2}
+    for axis, (lo, hi) in pose_range.items():
+        col = axis_to_col[axis]
+        position_samples[:, col] = torch.empty(n, device=env.device).uniform_(lo, hi)
+
+    # 转换到世界坐标系（所有阶段都相对于机器人）
+    robot_pos = robot.data.root_pos_w[env_ids]
+    robot_quat = robot.data.root_quat_w[env_ids]
+    position_samples_world = robot_pos + quat_apply(robot_quat, position_samples)
+    root_state[:, 0:3] = position_samples_world
+
+    # 速度采样（通常为0，由 randomize_target_velocity 单独控制）
+    velocity_samples = torch.zeros((n, 6), device=env.device)
+    for axis, (lo, hi) in velocity_range.items():
+        col = axis_to_col[axis]
+        velocity_samples[:, col] = torch.empty(n, device=env.device).uniform_(lo, hi)
+
+    root_state[:, 7:13] = velocity_samples
+
+    # 写入模拟器
+    asset.write_root_state_to_sim(root_state, env_ids=env_ids)
+

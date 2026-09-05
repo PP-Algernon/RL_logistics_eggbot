@@ -1,7 +1,8 @@
 # eggtart_grasp
 
-Isaac Lab external extension for the Eggtart Mecanum-wheeled mobile manipulator: a 4-wheel
-Mecanum base + 5-axis arm + gripper learning to chase and grasp a moving target.
+Isaac Lab external extension for the Eggtart mobile manipulator: a 4-wheel omnidirectional base
++ 5-axis arm + force-controlled gripper learning to navigate to a cube on the ground, grasp it,
+and lift it.
 
 Install (from the Isaac Lab root):
 
@@ -11,7 +12,8 @@ Install (from the Isaac Lab root):
 
 Registered tasks:
 
-- `Isaac-Mobile-Grasp-Eggtart-v0` — training
+- `Isaac-Mobile-Grasp-Eggtart-v0` — training (target gets a small random initial velocity)
+- `Isaac-Mobile-Grasp-Eggtart-Static-v0` — training with a fully static target (easier)
 - `Isaac-Mobile-Grasp-Eggtart-Play-v0` — visualisation / evaluation
 
 See the project root `README.md` for full usage.

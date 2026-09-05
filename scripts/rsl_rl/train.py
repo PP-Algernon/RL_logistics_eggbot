@@ -174,9 +174,10 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
     # 运行训练（课程学习由环境侧的 CurriculumManager 负责，见 CurriculumCfg）
     print("[INFO] 开始训练（启用课程学习）...")
     print("[INFO] 课程学习策略（step = 迭代数 × num_steps_per_env）:")
-    print("  - iter 0-500    (step 0-12000)    : 阶段 1 - 学习底盘接近 + 朝向")
-    print("  - iter 500-1000 (step 12000-24000): 阶段 2 - 引入末端执行器到达")
-    print("  - iter 1000+    (step 24000+)     : 阶段 3 - 完整任务（抓取和回收）")
+    print("  - 阶段 1 - 学习底盘接近 + 朝向")
+    print("  - 阶段 2 - 引入末端执行器到达")
+    print("  - 阶段 3 - 完整任务（抓取和回收）")
+
 
     # learn() 只调一次，让 rsl_rl 自己管迭代计数和日志
     runner.learn(num_learning_iterations=agent_cfg.max_iterations, init_at_random_ep_len=True)
