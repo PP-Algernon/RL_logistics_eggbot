@@ -198,19 +198,4 @@ step 48000  : grasp (30.0)
 ./isaaclab.sh -p source/eggtart_grasp/scripts/calibrate_grasp_offset.py
 ```
 
-## 待办
 
-- [ ] 抓取后收臂搬运：`retract_bonus_lift` 已实现但当前未挂进 `RewardsCfg`，先把稳定提起练出来。
-- [ ] 恢复"追移动目标"：解禁 `randomize_target_velocity` 的阶段阈值，并把阶段 3 的随机范围练通。
-- [ ] 真实麦轮：给轮子加滚子几何，把 `HolonomicBaseAction` 换回标定好的 `MecanumBaseAction`。
-- [ ] 标定 `init_state.pos` 的离地高度，让轮子恰好落在地面上。
-- [ ] Sim2sim：脚本转 MJCF + 导出 ONNX，在 MuJoCo 里验证策略。
-
-## 相关文档
-
-`.doc/` 下有更细的记录：[TRAINING_GUIDE.md](.doc/TRAINING_GUIDE.md)、
-[TODO_GUIDE.md](.doc/TODO_GUIDE.md)、[grasp_training_improvements.md](.doc/grasp_training_improvements.md)、
-[ToT.md](.doc/ToT.md)（调参思路）、[RELATED_PROJECTS.md](.doc/RELATED_PROJECTS.md)。
-
-根目录的 `QUICK_START_GRASP.md` / `IMPLEMENTATION_SUMMARY.md` / `MODIFICATIONS_COMPLETED.md` /
-`CHANGES_GRASP_REWARD.md` 是历史改动记录，其中的数值（如 0.35 m 提升阈值）**已过时**，以代码为准。

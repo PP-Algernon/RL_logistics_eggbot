@@ -94,3 +94,64 @@ class reward_weight_schedule(ManagerTermBase):
             print(f"[Curriculum] step {env.common_step_counter}: {term_name} 权重 -> {weight}")
 
         return weight
+
+
+class reward_param_schedule(ManagerTermBase):
+    """按步数分段设置某个奖励项的参数值（而非权重）
+
+    用于动态调整奖励函数内部的参数，如门控系数、阈值等。
+    与 reward_weight_schedule 类似，但修改的是 params 字典中的值。
+
+    Args:
+        term_name: 要调整的奖励项名字，须与 RewardsCfg 中的字段名一致
+        param_name: 要调整的参数名，须与该奖励项 params 字典中的 key 一致
+        schedule: ``[(起始步数, 参数值), ...]``，按起始步数升序。取最后一个
+            ``起始步数 <= common_step_counter`` 的值。第一项通常是 ``(0, 初始值)``。
+
+    Returns:
+        当前参数值（float），会被 CurriculumManager 记到日志里，
+        TensorBoard 中可以看到 ``Curriculum/<term>_<param>`` 曲线。
+
+    Example:
+        # 让 gripper_closure_reward 的 gate_blend 从 0 平滑过渡到 1
+        gripper_gate_blend_sched = CurrTerm(
+            func=mdp.reward_param_schedule,
+            params={
+                "term_name": "gripper_closure_reward",
+                "param_name": "gate_blend",
+                "schedule": [(0, 0.0), (60000, 0.0), (84000, 1.0)],
+            },
+        )
+    """
+
+    def __init__(self, cfg: CurriculumTermCfg, env: ManagerBasedRLEnv):
+        super().__init__(cfg, env)
+        self._term_name = cfg.params["term_name"]
+        self._param_name = cfg.params["param_name"]
+        self._term_cfg = env.reward_manager.get_term_cfg(self._term_name)
+        # 排序一次
+        self._schedule = sorted(cfg.params["schedule"], key=lambda kv: kv[0])
+
+    def __call__(
+        self,
+        env: ManagerBasedRLEnv,
+        env_ids: Sequence[int],
+        term_name: str,
+        param_name: str,
+        schedule: Sequence[tuple[int, float]],
+    ) -> float:
+        # 找当前步数对应的参数值
+        value = self._schedule[0][1]
+        for start_step, v in self._schedule:
+            if env.common_step_counter >= start_step:
+                value = v
+            else:
+                break
+
+        # 更新参数字典
+        if self._term_cfg.params[param_name] != value:
+            self._term_cfg.params[param_name] = value
+            env.reward_manager.set_term_cfg(term_name, self._term_cfg)
+            print(f"[Curriculum] step {env.common_step_counter}: {term_name}.{param_name} -> {value}")
+
+        return value

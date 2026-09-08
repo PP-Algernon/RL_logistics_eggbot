@@ -357,8 +357,11 @@ def ee_to_target_tanh(
     grasp_offset: tuple[float, float, float] | None = None,
     use_link5_com: bool = False,
     link5_cfg: SceneEntityCfg | None = None,
+    narrow_std: float | None = None,
+    wide_weight: float = 0.6,
 ) -> torch.Tensor:
-    """奖励抓取点接近目标（使用 tanh 核）
+    """奖励抓取点接近目标（tanh 核，可选双核）
+
     三维空间距离越近，奖励越高。
 
     支持两种计算方式：
@@ -373,12 +376,25 @@ def ee_to_target_tanh(
         grasp_offset: 抓取点相对 end_effector body 原点的偏移（局部系）
         use_link5_com: 是否使用 link5 质心作为参考点
         link5_cfg: link5 实体配置，use_link5_com=True 时必须提供
+        narrow_std: 窄核宽度。None 表示单核（向后兼容）；给值则启用双核，
+            用于在近场提供陡峭梯度，把抓取点推进最后 10cm
+        wide_weight: 双核中宽核的占比，窄核占 1-wide_weight
 
     Returns:
         shape (num_envs,) 的奖励张量，范围 [0, 1]
     """
     dist = _ee_to_target_distance(env, ee_cfg, target_cfg, grasp_offset, use_link5_com, link5_cfg)
-    return 1.0 - torch.tanh(dist / std)
+    if narrow_std is None:
+        return 1.0 - torch.tanh(dist / std)
+    # 双核：宽核保远场引导，窄核给近场精修。
+    # 单核解决不了这个矛盾——实测 std=0.2 时 0.1m 处 r≈0.54、梯度已很平，
+    # 策略推不动最后 10cm；而把 std 降到 0.1 虽然近场变陡，远场
+    # (0.6->0.3m) 梯度会从 0.45 崩到 0.025，等于砍掉 95% 的"伸手靠近"引导。
+    # 0.6×std(0.3) + 0.4×std(0.08) 下远场 1.36×、精修 1.26×（相对旧 std=0.2），
+    # 中场保留 73%。
+    wide = 1.0 - torch.tanh(dist / std)
+    narrow = 1.0 - torch.tanh(dist / narrow_std)
+    return wide_weight * wide + (1.0 - wide_weight) * narrow
 
 
 def ee_to_target_distance_l2(
@@ -687,11 +703,18 @@ def gripper_closure_bonus(
     grasp_offset: tuple[float, float, float] | None = None,
     gripper_open_pos: float = 1.0,
     gripper_full_close_pos: float = 0.05,
+    # 渐进式"夹住物体"门控参数
+    gate_blend: float = 0.0,
+    gate_pos_min: float = 0.18,
+    gate_pos_max: float = 0.32,
+    gate_effort_threshold: float = 0.1,
 ) -> torch.Tensor:
-    """正向奖励：接近目标时闭合夹爪（配合正权重使用）
+    """正向奖励：接近目标时闭合夹爪 + 可选的渐进式"夹住物体"门控
 
-    这是 gripper_close_when_near 的反向版本，用于鼓励而非惩罚。
-    当机器人接近目标并闭合夹爪时给予奖励，无任何惩罚。
+    前期（gate_blend=0）：proximity × close_amount，抓空也给分，让策略学会大胆闭爪。
+    后期（gate_blend=1）：加入"真的夹住"判据（位置卡在物块厚度 + 正在施力），
+                         抓空不给分，逼策略区分夹住/夹空。
+    中间（gate_blend ∈ (0,1)）：线性插值，平滑过渡。
 
     Args:
         env: 环境实例
@@ -700,25 +723,58 @@ def gripper_closure_bonus(
         grasp_offset: 抓取点相对 end_effector body 原点的偏移
         gripper_open_pos: 夹爪完全张开的关节角
         gripper_full_close_pos: 视为"完全闭合"的关节角
+        gate_blend: 门控混合系数 [0,1]，由 curriculum 控制（默认 0=不门控）
+        gate_pos_min: 夹住物体时的最小夹爪位置（如 0.18，物块厚度下界）
+        gate_pos_max: 夹住物体时的最大夹爪位置（如 0.32，物块厚度上界）
+        gate_effort_threshold: 扭矩阈值（Nm），大于此值算"正在施力"
 
     Returns:
         shape (num_envs,)，范围 [0, 1]，配合正权重使用
-        - 接近目标 且 夹爪闭合 -> 1.0 (最大奖励)
-        - 接近目标 且 夹爪打开 -> 0.0 (无奖励)
-        - 远离目标 -> 0.0 (无奖励)
+        - gate_blend=0: 接近且闭合 -> 1.0 (抓空也给)
+        - gate_blend=1: 接近且闭合且夹住 -> 1.0，抓空 -> 0
     """
     robot: Articulation = env.scene[ee_cfg.name]
 
-    # 距离门控
+    # 距离门控。开方是为了让窗口内部有足够的部分信用：
+    # 线性门控下抓取点在 0.7*thresh 处只剩 0.3 的系数，即使完全闭合，
+    # 乘上权重后仍小于 ee_reach 的量级，闭爪的信号会被淹没。
+    # 开方把 0.3 抬到 0.55，同时保持"越近越好"的单调梯度和 thresh 处归零的硬边界
+    # （硬边界是防止在远处白拿闭爪奖励的关键，不能去掉）。
     dist = _ee_to_target_distance(env, ee_cfg, target_cfg, grasp_offset)
-    proximity = torch.clamp(1.0 - dist / reach_threshold, 0.0, 1.0)
+    proximity = torch.sqrt(torch.clamp(1.0 - dist / reach_threshold, 0.0, 1.0))
 
     # 闭合程度归一化到 [0, 1]：full_close -> 1 (最大奖励)，open -> 0 (无奖励)
     gripper_pos = robot.data.joint_pos[:, gripper_cfg.joint_ids[0]]
     span = max(gripper_open_pos - gripper_full_close_pos, 1e-6)
     close_amount = torch.clamp(1.0 - (gripper_pos - gripper_full_close_pos) / span, 0.0, 1.0)
 
-    return proximity * close_amount
+    # 基础奖励（抓空也给）
+    base_reward = proximity * close_amount
+
+    # 渐进式"夹住物体"门控
+    if gate_blend > 1e-6:
+        # 位置门控：夹爪卡在物块厚度范围内（闭到底=0.05 说明抓空）
+        pos_in_range = (gripper_pos >= gate_pos_min) & (gripper_pos <= gate_pos_max)
+
+        # 力门控：正在施力
+        if robot.data.applied_torque is not None and robot.data.applied_torque.numel() > 0:
+            gripper_effort = robot.data.applied_torque[:, gripper_cfg.joint_ids[0]]
+            is_applying_force = torch.abs(gripper_effort) > gate_effort_threshold
+        elif robot.data.joint_effort_target is not None and robot.data.joint_effort_target.numel() > 0:
+            gripper_effort = robot.data.joint_effort_target[:, gripper_cfg.joint_ids[0]]
+            is_applying_force = torch.abs(gripper_effort) > gate_effort_threshold
+        else:
+            # 降级：速度接近 0 说明被卡住
+            gripper_vel = robot.data.joint_vel[:, gripper_cfg.joint_ids[0]]
+            is_applying_force = torch.abs(gripper_vel) < 0.02
+
+        is_holding = pos_in_range & is_applying_force
+
+        # 线性混合：gate_blend=0 忽略门控，gate_blend=1 完全门控
+        # 抓空时 is_holding=0，奖励从 base_reward 衰减到 base_reward×(1-gate_blend)
+        return base_reward * (1.0 - gate_blend * (1.0 - is_holding.float()))
+    else:
+        return base_reward
 
 
 def ee_lift_when_near(
@@ -1102,7 +1158,7 @@ def target_lift_progress(
     target_height: float = 0.12,
     std: float = 0.05,
     gripper_closed_threshold: float = 0.35,
-    gripper_open_pos: float = 0.05,
+    gripper_open_pos: float = 1.0,  # 张开端；必须 > gripper_closed_threshold
 ) -> torch.Tensor:
     """渐进式目标提升奖励：目标物体提得越高，奖励越多（需要夹爪闭合）
 
@@ -1122,7 +1178,7 @@ def target_lift_progress(
                 "target_cfg": SceneEntityCfg("target"),
                 "gripper_cfg": SceneEntityCfg("robot", joint_names=[EGGTART_GRIPPER_JOINT_NAME]),
                 "gripper_closed_threshold": GRIPPER_CLOSED_THRESHOLD,
-                "gripper_open_pos": 0.05,
+                "gripper_open_pos": EGGTART_GRIPPER_OPEN,  # 1.0，张开端
             },
         )
 
@@ -1133,7 +1189,7 @@ def target_lift_progress(
         target_height: 目标高度（m），提到此高度时奖励最大
         std: 高斯核标准差（m），控制奖励的平滑度
         gripper_closed_threshold: 夹爪闭合阈值，小于此值算完全闭合
-        gripper_open_pos: 夹爪完全张开位置
+        gripper_open_pos: 夹爪完全**张开**的关节角（须 > gripper_closed_threshold）
 
     Returns:
         奖励张量，夹爪闭合度 × 提升奖励，范围 [0, 1]
@@ -1146,7 +1202,16 @@ def target_lift_progress(
 
     # 渐进式门控：夹爪闭合度（连续值 0~1，提供密集梯度）
     gripper_pos = robot.data.joint_pos[:, gripper_cfg.joint_ids[0]]
+    # span 必须为正：gripper_open_pos 是**张开**端（大值，如 1.0），
+    # gripper_closed_threshold 是闭合端（小值，如 0.35）。传反会让整个门控反号——
+    # 夹爪张开时反而拿满分，权重又比 gripper_closure_reward 大，
+    # 策略会稳定收敛到"永久张开"。这里显式报错而不是静默算错。
     span = gripper_open_pos - gripper_closed_threshold  # 张开到闭合的行程
+    if span <= 0:
+        raise ValueError(
+            f"target_lift_progress: gripper_open_pos ({gripper_open_pos}) 必须大于 "
+            f"gripper_closed_threshold ({gripper_closed_threshold})，否则闭合门控反号。"
+        )
     gripper_closure = torch.clamp((gripper_open_pos - gripper_pos) / span, 0.0, 1.0)
     # gripper_closure = 0: 完全张开，无奖励
     # gripper_closure = 0.5: 闭合一半，奖励减半
