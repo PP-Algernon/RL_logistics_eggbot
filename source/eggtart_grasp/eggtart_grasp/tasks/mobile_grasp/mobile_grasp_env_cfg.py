@@ -510,7 +510,7 @@ class CurriculumCfg:
     )
     grasp_posture_guide_sched = CurrTerm(
         func=mdp.reward_weight_schedule,
-        params={"term_name": "grasp_posture_guide", "schedule": [(0, 0.0), (CURRICULUM_STAGE2_START_ITER*24, 4.0)]},
+        params={"term_name": "grasp_posture_guide", "schedule": [(0, 0.0), (CURRICULUM_STAGE2_START_ITER/2*24, 4.0)]},
     )
     ee_distance_sched = CurrTerm(
         func=mdp.reward_weight_schedule,
@@ -556,23 +556,23 @@ class CurriculumCfg:
         params={"term_name": "grasp", "schedule": [(0, 0.0), (CURRICULUM_STAGE3_START_ITER*24, 30.0)]},
     )
 
-    # ========== 约束项（全程） ==========
+    # ========== 约束项 ==========
     joint_limits_sched = CurrTerm(
         func=mdp.reward_weight_schedule,
-        params={"term_name": "joint_limits", "schedule": [(0, -0.5)]},
+        params={"term_name": "joint_limits", "schedule": [(0, -0.1)]},
     )
     joint_vel_sched = CurrTerm(
         func=mdp.reward_weight_schedule,
-        params={"term_name": "joint_vel", "schedule": [(0, -0.0005), (CURRICULUM_STAGE2_START_ITER*24, -0.001)]},
+        params={"term_name": "joint_vel", "schedule": [(0, 0.0), (CURRICULUM_STAGE2_START_ITER*24, -0.001)]},
     )
     action_rate_sched = CurrTerm(
         func=mdp.reward_weight_schedule,
-        params={"term_name": "action_rate", "schedule": [(0, -0.002), (CURRICULUM_STAGE2_START_ITER*24, -0.005)]},
+        params={"term_name": "action_rate", "schedule": [(0, -0.005), (CURRICULUM_STAGE2_START_ITER*24, -0.001)]},
     )
     base_vel_sched = CurrTerm(
         func=mdp.reward_weight_schedule,
         params={"term_name": "base_vel", 
-                "schedule": [(0, 0.0), (CURRICULUM_STAGE2_START_ITER*24, -0.5), (CURRICULUM_STAGE3_START_ITER*24, -1.5)]
+                "schedule": [(0, 0.0), (CURRICULUM_STAGE2_START_ITER*24, -0.5), (CURRICULUM_STAGE3_START_ITER*24, -1.0)]
         },
     )
     
