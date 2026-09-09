@@ -77,6 +77,7 @@ GRASP_DWELL_TIME = 0.2  # s (降低难度，让policy先学会基本动作)
 CURRICULUM_STAGE1_START_ITER = 0
 CURRICULUM_STAGE2_START_ITER = 750
 CURRICULUM_STAGE3_START_ITER = 2000
+CURRICULUM_STAGE4_START_ITER = 4000  
 
 # 逆向课程学习：三阶段目标初始位置和行为控制
 # 阶段 1 (step 0-36000, 1500 iter): 固定正前方 + 主动靠近夹爪（最简单）
@@ -563,7 +564,7 @@ class CurriculumCfg:
     )
     joint_vel_sched = CurrTerm(
         func=mdp.reward_weight_schedule,
-        params={"term_name": "joint_vel", "schedule": [(0, 0.0), (CURRICULUM_STAGE2_START_ITER*24, -0.001)]},
+        params={"term_name": "joint_vel", "schedule": [(0, -0.001), (CURRICULUM_STAGE2_START_ITER*24, -0.0001)]},
     )
     action_rate_sched = CurrTerm(
         func=mdp.reward_weight_schedule,
@@ -571,9 +572,7 @@ class CurriculumCfg:
     )
     base_vel_sched = CurrTerm(
         func=mdp.reward_weight_schedule,
-        params={"term_name": "base_vel", 
-                "schedule": [(0, 0.0), (CURRICULUM_STAGE2_START_ITER*24, -0.5), (CURRICULUM_STAGE3_START_ITER*24, -1.0)]
-        },
+        params={"term_name": "base_vel", "schedule": [(0, -0.5), (CURRICULUM_STAGE4_START_ITER*24, -1.0)]},
     )
     
 
