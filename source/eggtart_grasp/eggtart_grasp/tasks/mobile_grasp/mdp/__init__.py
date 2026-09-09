@@ -10,4 +10,4 @@ from .target import randomize_target_velocity, target_approach_ee_direction, res
 from .terminations import base_tipped  # noqa: F401
 
 # Explicitly export new reward functions to ensure they're available
-from .rewards import grasp_bonus_lift, retract_bonus_lift, ee_lift_when_near, arm_comfort, gripper_closure_bonus  # noqa: F401
+from .rewards import grasp_bonus_lift, retract_bonus_lift, ee_lift_when_near, arm_comfort, gripper_closure_bonus, ee_to_target_precision  # noqa: F401

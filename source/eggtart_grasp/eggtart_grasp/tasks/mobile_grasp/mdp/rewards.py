@@ -3,7 +3,8 @@
 阶段设计（除特殊说明外均为稠密奖励）：
   1. ``base_to_target_xy_tanh``  -- 引导底盘在水平面接近目标
   2. ``base_facing_target``      -- 引导底盘正面朝向目标
-  3. ``ee_to_target_tanh``       -- 引导末端执行器到达目标
+  3. ``ee_to_target_tanh``       -- 引导末端执行器到达目标（远/中场）
+  3'. ``ee_to_target_precision``  -- 近场精修：只在最后几厘米内有梯度，训练后期打开
   4. ``grasp_bonus``             -- 当末端执行器接近目标且夹爪闭合时给予稀疏奖励
   4'. ``grasp_bonus_dwell``      -- 同上，但要求**连续停留**一段时间后闭爪才算（治夹早）
   5. ``retract_bonus``           -- 抓取后奖励机械臂回到初始姿态
@@ -19,6 +20,7 @@
 
 from __future__ import annotations
 
+import math
 from typing import TYPE_CHECKING
 
 import torch
@@ -395,6 +397,90 @@ def ee_to_target_tanh(
     wide = 1.0 - torch.tanh(dist / std)
     narrow = 1.0 - torch.tanh(dist / narrow_std)
     return wide_weight * wide + (1.0 - wide_weight) * narrow
+
+
+def ee_to_target_precision(
+    env: ManagerBasedRLEnv,
+    std: float = 0.02,
+    support: float = 0.05,
+    ee_cfg: SceneEntityCfg = SceneEntityCfg("robot", body_names="end_effector"),
+    target_cfg: SceneEntityCfg = SceneEntityCfg("target"),
+    grasp_offset: tuple[float, float, float] | None = None,
+    use_link5_com: bool = False,
+    link5_cfg: SceneEntityCfg | None = None,
+) -> torch.Tensor:
+    """近场精修奖励：只在抓取点进入 ``support`` 后才有梯度，用于训练后期精准对齐
+
+    **为什么 ee_to_target_tanh 不够（这一项要解决什么）**
+        ``1 - tanh(d/std)`` 在 d 远小于 std 时已经饱和到 ~1。即使双核里最窄的
+        std=0.08，d 从 0.02 m 收到 0.005 m 也只带来约 0.019 的奖励增量——
+        在权重 3.0 下是 0.056，比 action_rate / joint_vel 的抖动噪声还小。
+        也就是说"看着差不多对上了"和"真的对准了"在旧项里几乎同分，
+        策略没有理由再往里挤最后那 2 cm。
+
+        本项换成高斯核，把奖励的**陡峭区间放在 0 附近**而不是 std 附近：
+        d=0.02 → 0.61，d=0.01 → 0.88，d=0.005 → 0.97。同样从 0.02 收到 0.005，
+        奖励涨 0.36（是旧项 0.019 的 19 倍），最后一段才真正有推力。
+
+    **为什么要减掉边界值再归一化（不能直接返回高斯核）**
+        直接返回 ``exp(-(d/std)^2)`` 在 d=support 处还有一个不为 0 的残值
+        （support=0.05, std=0.02 时是 0.0019），乘上大权重后会在 support 边界
+        形成一道奖励断崖——策略可以靠"反复跨进跨出边界"薅分，而且断崖处的
+        梯度不连续对 PPO 的 value 拟合不友好。
+        这里做 ``(k(d) - k(support)) / (1 - k(support))``，让奖励在 d=support
+        处**连续地**归零、在 d=0 处正好是 1.0，边界内外平滑接上。
+
+    **为什么带 support 硬截断（而不是让高斯自然衰减）**
+        这一项的定位是"精修"，不是"引导"。远场引导由 ``ee_reach`` 负责，
+        两项叠加时如果本项在远处也有值，等于把 ee_reach 的形状改了。
+        截断保证它在 5 cm 外恒为 0，可以独立调权重而不影响已经训好的远场行为。
+
+    **和 curriculum 的配合**
+        建议 ``weight: 0 -> N`` 在阶段 3 前后拉起来（见 env-cfg 的
+        ``ee_precision_sched``）。从 0 开始拉是关键：本项只增不减地往总回报里
+        加东西，不会像"把 ee_reach 的 std 调小"那样降低策略已有的收益——
+        后者在上一次训练里直接导致策略放弃伸手、退回去刷底盘分。
+
+        也可以再叠一层 ``reward_param_schedule`` 逐步收紧 ``std``
+        （如 0.03 -> 0.02 -> 0.015），做"先粗对齐再精对齐"。因为本项在
+        d→0 处始终是 1.0，收紧 std 不会降低"已经对准"状态的分数，
+        只是把要求提高，比在 ee_reach 上收紧安全得多。
+
+    Args:
+        env: 环境实例
+        std: 高斯核宽度（米）。控制"多近才算对准"。
+            0.02 → d=2cm 得 0.61；0.015 → d=2cm 得 0.36（更严格）
+        support: 支撑半径（米）。抓取点在此距离外奖励恒为 0。
+            应当 >= 2*std，否则截断点落在高斯核还很陡的地方，
+            归一化后近场梯度会被压平（support=2*std 时 k(support)=0.018，尚可；
+            support < 1.5*std 则不推荐）。
+        ee_cfg: 末端执行器实体配置
+        target_cfg: 目标物体实体配置
+        grasp_offset: 抓取点相对 body 原点的偏移（局部系）
+        use_link5_com: 是否使用 link5 质心作为参考点
+        link5_cfg: link5 实体配置，use_link5_com=True 时必须提供
+
+    Returns:
+        shape (num_envs,) 的奖励张量，范围 [0, 1]
+        - 抓取点与目标重合 -> 1.0
+        - 抓取点在 support 处 -> 0.0（连续，无断崖）
+        - 抓取点在 support 之外 -> 0.0
+    """
+    if std <= 0.0:
+        raise ValueError(f"ee_to_target_precision: std 必须为正，收到 {std}")
+    if support <= 0.0:
+        raise ValueError(f"ee_to_target_precision: support 必须为正，收到 {support}")
+
+    dist = _ee_to_target_distance(env, ee_cfg, target_cfg, grasp_offset, use_link5_com, link5_cfg)
+
+    # 高斯核 + 边界归零：(k(d) - k(support)) / (1 - k(support))
+    # k(support) 是标量，用 math.exp 算，避免每步建临时张量
+    kernel = torch.exp(-torch.square(dist / std))
+    edge = math.exp(-((support / std) ** 2))
+    reward = (kernel - edge) / (1.0 - edge)
+
+    # support 之外恒为 0（clamp 已能保证非负，这里显式截断表达意图）
+    return torch.where(dist < support, reward.clamp(min=0.0), torch.zeros_like(reward))
 
 
 def ee_to_target_distance_l2(
