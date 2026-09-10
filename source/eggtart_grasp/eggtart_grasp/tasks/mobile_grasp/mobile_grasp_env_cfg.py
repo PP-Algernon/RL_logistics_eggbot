@@ -526,7 +526,7 @@ class CurriculumCfg:
     # 它的价值在于让"对准之后闭爪"这件事能真的夹到东西。
     ee_precision_sched = CurrTerm(
         func=mdp.reward_weight_schedule,
-        params={"term_name": "ee_precision", "schedule": [(0, 0.0), (CURRICULUM_STAGE3_START_ITER*24, 5.0)]},
+        params={"term_name": "ee_precision", "schedule": [(0, 0.0), (CURRICULUM_STAGE3_START_ITER*24, 10.0)]},
     )
 
     # ========== 阶段 3: 抓取 ==========
