@@ -26,6 +26,7 @@ from eggtart_grasp.assets.eggtart import (
     EGGTART_GRIPPER_JOINT_NAME,
     EGGTART_GRIPPER_OPEN,
     EGGTART_WHEEL_JOINT_BODY_REGEX,
+    EGGTART_GRASP_JOINT_POS,
 )
 
 # Import constants from base config
@@ -87,7 +88,7 @@ class RouteBRewardsCfg:
         func=mdp.grasp_posture_guide,
         weight=1.5,  # Reduced from 4.0
         params={
-            "target_joint_pos": [0.0, -0.5, 0.8, 0.3, 0.0],  # Placeholder, use actual EGGTART_GRASP_JOINT_POS
+            "target_joint_pos": EGGTART_GRASP_JOINT_POS,
             "std": 1.0,
             "reach_threshold": GRASP_REACH_THRESHOLD * 3,
             "arm_cfg": SceneEntityCfg("robot", joint_names=EGGTART_ARM_JOINT_NAMES),

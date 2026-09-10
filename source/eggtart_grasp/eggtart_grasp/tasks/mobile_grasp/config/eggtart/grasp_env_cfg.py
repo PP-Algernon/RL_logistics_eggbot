@@ -41,3 +41,27 @@ class EggtartMobileGraspEnvCfg_PLAY(EggtartMobileGraspEnvCfg):
         self.scene.num_envs = 50
         self.scene.env_spacing = 3.0
         self.observations.policy.enable_corruption = False
+
+
+@configclass
+class EggtartMobileGraspEnvStaticBCPPOCfg(MobileGraspEnvStaticCfg):
+    """BC + PPO training configuration (Route B) with simplified rewards.
+
+    Key differences from standard configuration:
+    - Uses simplified reward configuration (only 5 core terms)
+    - No reward weight curriculum (all active from step 0)
+    - Designed for BC pretraining + PPO fine-tuning workflow
+    """
+
+    def __post_init__(self):
+        super().__post_init__()
+        # Attach the Eggtart robot
+        self.scene.robot = EGGTART_CFG.replace(prim_path="{ENV_REGEX_NS}/Robot")
+
+        # Replace with Route B simplified rewards
+        from eggtart_grasp.tasks.mobile_grasp.route_b_rewards import (
+            RouteBRewardsCfg,
+            RouteBCurriculumCfg,
+        )
+        self.rewards = RouteBRewardsCfg()
+        self.curriculum = RouteBCurriculumCfg()

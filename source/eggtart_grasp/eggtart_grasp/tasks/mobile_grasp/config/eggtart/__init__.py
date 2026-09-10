@@ -41,3 +41,14 @@ gym.register(
     },
 )
 
+# BC + PPO training version (Route B - simplified rewards)
+gym.register(
+    id="Isaac-Mobile-Grasp-Eggtart-BCPPO-v0",
+    entry_point="isaaclab.envs:ManagerBasedRLEnv",
+    disable_env_checker=True,
+    kwargs={
+        "env_cfg_entry_point": grasp_env_cfg.EggtartMobileGraspEnvStaticBCPPOCfg,
+        "rsl_rl_cfg_entry_point": f"{agents.__name__}.rsl_rl_ppo_cfg:EggtartMobileGraspPPORunnerCfg",
+    },
+)
+
