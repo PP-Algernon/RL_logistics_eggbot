@@ -25,6 +25,11 @@ parser.add_argument("--num_envs", type=int, default=None, help="要仿真的环�
 parser.add_argument("--task", type=str, default=None, help="任务名称")
 parser.add_argument("--seed", type=int, default=None, help="环境使用的随机种子")
 parser.add_argument("--max_iterations", type=int, default=None, help="强化学习策略训练迭代次数")
+parser.add_argument("--demo_data", type=str, default=None, help="显式启用 DAPG，指定成功演示 HDF5；省略则为普通 PPO")
+parser.add_argument("--bc_coef", type=float, default=0.1, help="DAPG 初始 MSE 权重")
+parser.add_argument("--bc_decay", type=float, default=0.95, help="每次 PPO update 后的权重衰减系数")
+parser.add_argument("--bc_min_coef", type=float, default=0.001, help="DAPG 权重下限")
+parser.add_argument("--demo_batch_size", type=int, default=1024, help="每个 PPO minibatch 的演示样本数")
 # 追加 RSL-RL 命令行参数
 cli_args.add_rsl_rl_args(parser)
 # 追加 AppLauncher 命令行参数
@@ -48,8 +53,7 @@ import gymnasium as gym
 import os
 import torch
 from datetime import datetime
-# DAPG: 优先使用项目内 fork 的 rsl_rl（third_party），改源码即时生效
-sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))), "third_party"))
+# cli_args 已将 BC/PPO 共用的 third_party/rsl_rl_lib-3.1.2 放在导入路径首位。
 
 from rsl_rl.runners import OnPolicyRunner
 
@@ -78,10 +82,7 @@ def dump_pickle(file_path, data):
         pickle.dump(data, f)
 
 from isaaclab_rl.rsl_rl import RslRlOnPolicyRunnerCfg, RslRlVecEnvWrapper
-from isaaclab_tasks.utils import get_checkpoint_path
 
-import importlib.metadata as metadata
-installed_version = metadata.version("rsl-rl-lib")
 from isaaclab_tasks.utils.hydra import hydra_task_config
 
 # 导入扩展以设置环境任务
@@ -157,15 +158,45 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
 
     # 从 rsl-rl 创建 runner
     runner = OnPolicyRunner(env, agent_cfg.to_dict(), log_dir=log_dir, device=agent_cfg.device)
+    import rsl_rl
+    print(f"[INFO] rsl_rl source: {rsl_rl.__file__}")
     # 将 git 状态写入日志
     runner.add_git_repo_to_log(__file__)
     # 在创建新 log_dir 之前保存恢复路径
     if agent_cfg.resume:
         # 获取之前 checkpoint 的路径
-        resume_path = get_checkpoint_path(log_root_path, agent_cfg.load_run, agent_cfg.load_checkpoint)
+        resume_path = cli_args.resolve_checkpoint(log_root_path, agent_cfg.load_run, agent_cfg.load_checkpoint)
         print(f"[INFO]: 从以下位置加载模型 checkpoint: {resume_path}")
         # 加载之前训练的模型
         runner.load(resume_path)
+
+    if args_cli.demo_data:
+        from pathlib import Path
+        from tensordict import TensorDict
+        sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+        from demo_dataset import load_dataset
+        demo_obs, demo_actions, val_obs, val_actions, demo_metadata = load_dataset(
+            args_cli.demo_data, seed=agent_cfg.seed,
+            split_metadata=runner.demo_dataset_metadata, expected_env=args_cli.task,
+        )
+        del val_obs, val_actions
+        runner.demo_dataset_metadata = demo_metadata
+        # A resumed DAPG checkpoint retains its annealing schedule.
+        schedule = runner.alg.dapg_state_dict()
+        resuming_dapg = schedule["coefficient"] > 0
+        runner.alg.set_demonstrations(
+            TensorDict({"policy": demo_obs}, batch_size=[len(demo_obs)]), demo_actions,
+            coefficient=schedule["coefficient"] if resuming_dapg else args_cli.bc_coef,
+            decay=schedule["decay"] if resuming_dapg else args_cli.bc_decay,
+            min_coefficient=schedule["min_coefficient"] if resuming_dapg else args_cli.bc_min_coef,
+            batch_size=schedule["batch_size"] if resuming_dapg else args_cli.demo_batch_size,
+        )
+        print(f"[DAPG] {len(demo_obs):,} demonstration samples; schedule={runner.alg.dapg_state_dict()}")
+        dump_yaml(os.path.join(log_dir, "params", "dapg.yaml"), {
+            **runner.alg.dapg_state_dict(), "dataset": demo_metadata,
+        })
+    else:
+        print("[INFO] Standard PPO: demonstration loss disabled")
 
     # 将配置转储到日志目录
     dump_yaml(os.path.join(log_dir, "params", "env.yaml"), env_cfg)
@@ -174,11 +205,7 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
     dump_pickle(os.path.join(log_dir, "params", "agent.pkl"), agent_cfg)
 
     # 运行训练（课程学习由环境侧的 CurriculumManager 负责，见 CurriculumCfg）
-    print("[INFO] 开始训练（启用课程学习）...")
-    print("[INFO] 课程学习策略（step = 迭代数 × num_steps_per_env）:")
-    print("  - 阶段 1 - 学习底盘接近 + 朝向")
-    print("  - 阶段 2 - 引入末端执行器到达")
-    print("  - 阶段 3 - 完整任务（抓取和回收）")
+    print("[INFO] 开始训练；奖励和目标分布按本次保存的 params/env.yaml 执行")
 
 
     # learn() 只调一次，让 rsl_rl 自己管迭代计数和日志
@@ -195,4 +222,3 @@ if __name__ == "__main__":
     main()
     # 关闭 sim 应用
     simulation_app.close()
-

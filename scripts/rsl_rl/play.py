@@ -38,7 +38,7 @@ parser.add_argument(
     type=int,
     default=None,
     choices=[1, 2, 3],
-    help="手动指定逆课程学习阶段（1=目标主动靠近, 2=目标静止, 3=目标随机移动）。不指定则使用训练时的自动切换逻辑。",
+    help="选择目标分布阶段（1/2/3）；位置范围和移动行为遵循环境配置。",
 )
 # append RSL-RL cli arguments
 cli_args.add_rsl_rl_args(parser)
@@ -71,7 +71,7 @@ from isaaclab_rl.rsl_rl import (
     export_policy_as_jit,
     export_policy_as_onnx,
 )
-from isaaclab_tasks.utils import get_checkpoint_path, parse_env_cfg
+from isaaclab_tasks.utils import parse_env_cfg
 
 # Import extensions to set up environment tasks
 import eggtart_grasp.tasks  # noqa: F401
@@ -99,7 +99,7 @@ def main():
     log_root_path = os.path.join("logs", "rsl_rl", agent_cfg.experiment_name)
     log_root_path = os.path.abspath(log_root_path)
     print(f"[INFO] Loading experiment from directory: {log_root_path}")
-    resume_path = get_checkpoint_path(log_root_path, agent_cfg.load_run, agent_cfg.load_checkpoint)
+    resume_path = cli_args.resolve_checkpoint(log_root_path, agent_cfg.load_run, agent_cfg.load_checkpoint)
     log_dir = os.path.dirname(resume_path)
 
     # create isaac environment
@@ -110,23 +110,16 @@ def main():
         stage = args_cli.curriculum_stage
         print(f"[INFO] 手动设置逆课程学习阶段: {stage}")
 
-        # 映射阶段到 common_step_counter（模拟训练时的阶段切换逻辑）
-        # 阶段1: step < 64000,  阶段2: 64000 <= step < 120000,  阶段3: step >= 120000
-        if stage == 1:
-            env.unwrapped.common_step_counter = 0  # 阶段1开始
-            print("  → 目标会主动靠近末端方向点（当抓取点接近时）")
-        elif stage == 2:
-            env.unwrapped.common_step_counter = 36000  # 阶段2开始
-            print("  → 目标保持静止")
-        elif stage == 3:
-            env.unwrapped.common_step_counter = 96000  # 阶段3开始
-            print("  → 目标恢复随机移动")
-
-        # 锁定 common_step_counter，防止在回放过程中自动递增导致阶段切换
-        # 注意：这需要环境支持，如果环境没有 _lock_step_counter 属性会失败
-        if hasattr(env.unwrapped, 'common_step_counter'):
-            # 保存原始值，每次 step 后恢复
-            _locked_step = env.unwrapped.common_step_counter
+        # Use the same thresholds as reset_target; old hard-coded values selected
+        # the wrong stage after curriculum thresholds changed.
+        target_params = env_cfg.events.reset_target.params
+        _locked_step = {
+            1: 0,
+            2: target_params["stage2_start_step"],
+            3: target_params["stage3_start_step"],
+        }[stage]
+        env.unwrapped.common_step_counter = _locked_step
+        print(f"  → 目标课程计数设为 {_locked_step}；目标行为遵循环境配置")
     # wrap for video recording
     if args_cli.video:
         video_kwargs = {
@@ -149,12 +142,12 @@ def main():
     print(f"[INFO]: Loading model checkpoint from: {resume_path}")
     # load previously trained model
     ppo_runner = OnPolicyRunner(env, agent_cfg.to_dict(), log_dir=None, device=agent_cfg.device)
-    ppo_runner.load(resume_path)
+    ppo_runner.load(resume_path, load_optimizer=False)
 
     # obtain the trained policy for inference
     policy = ppo_runner.get_inference_policy(device=env.unwrapped.device)
 
-    # export policy to onnx/jit (rsl_rl >= 5.0: use runner built-in methods)
+    # Export the bundled rsl_rl 3.1.2 actor through Isaac Lab exporters.
     export_model_dir = os.path.join(os.path.dirname(resume_path), "exported")
     export_policy_as_jit(
         policy=ppo_runner.alg.policy,

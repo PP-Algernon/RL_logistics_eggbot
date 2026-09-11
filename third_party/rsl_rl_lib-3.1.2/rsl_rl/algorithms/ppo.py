@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import math
 import torch
 import torch.nn as nn
 import torch.optim as optim
@@ -122,6 +123,58 @@ class PPO:
         self.learning_rate = learning_rate
         self.normalize_advantage_per_mini_batch = normalize_advantage_per_mini_batch
 
+        # Optional demo-regularized PPO (MSE variant of DAPG).
+        self.demos = None
+        self.dapg_updates = 0
+        self.dapg_coef = 0.0
+        self.dapg_decay = 0.95
+        self.dapg_min_coef = 0.001
+        self.dapg_batch_size = 1024
+
+    def set_demonstrations(self, observations: TensorDict, actions: torch.Tensor,
+                           coefficient: float = 0.1, decay: float = 0.95,
+                           min_coefficient: float = 0.001, batch_size: int = 1024) -> None:
+        """Attach demonstrations without changing the current annealing iteration.
+
+        Keeping the dataset on CPU bounds GPU memory use independently of its size.
+        """
+        if self.policy.is_recurrent:
+            raise ValueError("DAPG currently supports feedforward policies only")
+        if not (math.isfinite(coefficient) and coefficient > 0 and 0 < decay <= 1
+                and 0 <= min_coefficient <= coefficient and batch_size > 0):
+            raise ValueError("Invalid DAPG coefficient/decay/min_coefficient/batch_size")
+        if len(actions) == 0 or observations.batch_size != torch.Size([len(actions)]) or actions.ndim != 2:
+            raise ValueError("Demonstration observations/actions must have a matching non-empty batch")
+        if not torch.isfinite(actions).all() or any(not torch.isfinite(v).all() for v in observations.values()):
+            raise ValueError("Demonstrations contain NaN/Inf")
+        observations, actions = observations.detach().to("cpu"), actions.detach().to("cpu")
+        with torch.no_grad():
+            output = self.policy.act_inference(observations[:1].to(self.device))
+        if output.shape[1:] != actions.shape[1:]:
+            raise ValueError("Demonstration action dimension does not match policy")
+        self.demos = (observations, actions)
+        self.dapg_coef, self.dapg_decay = coefficient, decay
+        self.dapg_min_coef, self.dapg_batch_size = min_coefficient, batch_size
+
+    def dapg_state_dict(self) -> dict:
+        return {"updates": self.dapg_updates, "coefficient": self.dapg_coef,
+                "decay": self.dapg_decay, "min_coefficient": self.dapg_min_coef,
+                "batch_size": self.dapg_batch_size}
+
+    def load_dapg_state_dict(self, state: dict) -> None:
+        self.dapg_updates = int(state["updates"])
+        self.dapg_coef = float(state["coefficient"])
+        self.dapg_decay = float(state["decay"])
+        self.dapg_min_coef = float(state["min_coefficient"])
+        self.dapg_batch_size = int(state["batch_size"])
+
+    def demonstration_loss(self) -> torch.Tensor:
+        """Use act_inference so the PPO rollout distribution remains intact."""
+        observations, actions = self.demos
+        indices = torch.randint(len(actions), (self.dapg_batch_size,))
+        prediction = self.policy.act_inference(observations[indices].to(self.device))
+        return nn.functional.mse_loss(prediction, actions[indices].to(self.device))
+
     def init_storage(
         self,
         training_type: str,
@@ -195,6 +248,8 @@ class PPO:
         mean_value_loss = 0
         mean_surrogate_loss = 0
         mean_entropy = 0
+        mean_bc_loss = 0.0
+        bc_coefficient = max(self.dapg_min_coef, self.dapg_coef * self.dapg_decay ** self.dapg_updates)
         # RND loss
         mean_rnd_loss = 0 if self.rnd else None
         # Symmetry loss
@@ -312,6 +367,11 @@ class PPO:
 
             loss = surrogate_loss + self.value_loss_coef * value_loss - self.entropy_coef * entropy_batch.mean()
 
+            if self.demos is not None:
+                bc_loss = self.demonstration_loss()
+                loss = loss + bc_coefficient * bc_loss
+                mean_bc_loss += bc_loss.item()
+
             # Symmetry loss
             if self.symmetry:
                 # Obtain the symmetric actions
@@ -413,6 +473,10 @@ class PPO:
             loss_dict["rnd"] = mean_rnd_loss
         if self.symmetry:
             loss_dict["symmetry"] = mean_symmetry_loss
+        if self.demos is not None:
+            loss_dict["dapg_bc"] = mean_bc_loss / num_updates
+            loss_dict["dapg_coefficient"] = bc_coefficient
+            self.dapg_updates += 1
 
         return loss_dict
 

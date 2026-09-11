@@ -1,7 +1,12 @@
 from __future__ import annotations
 
 import argparse
+from pathlib import Path
+import sys
 from typing import TYPE_CHECKING
+
+# Match the fork used by BC and DAPG, including when invoked from isaac-lab/.
+sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "third_party" / "rsl_rl_lib-3.1.2"))
 
 if TYPE_CHECKING:
     from isaaclab_rl.rsl_rl import RslRlOnPolicyRunnerCfg
@@ -21,9 +26,9 @@ def add_rsl_rl_args(parser: argparse.ArgumentParser):
     )
     arg_group.add_argument("--run_name", type=str, default=None, help="Run name suffix to the log directory.")
     # -- load arguments
-    arg_group.add_argument("--resume", type=bool, default=None, help="Whether to resume from a checkpoint.")
+    arg_group.add_argument("--resume", action=argparse.BooleanOptionalAction, default=None, help="Resume or initialize from a checkpoint.")
     arg_group.add_argument("--load_run", type=str, default=None, help="Name of the run folder to resume from.")
-    arg_group.add_argument("--checkpoint", type=str, default=None, help="Checkpoint file to resume from.")
+    arg_group.add_argument("--checkpoint", "--load_checkpoint", type=str, default=None, help="Checkpoint path or run-relative filename/pattern.")
     # -- logger arguments
     arg_group.add_argument(
         "--logger", type=str, default=None, choices={"wandb", "tensorboard", "neptune"}, help="Logger module to use."
@@ -64,6 +69,8 @@ def update_rsl_rl_cfg(agent_cfg: RslRlOnPolicyRunnerCfg, args_cli: argparse.Name
     # override the default configuration with CLI arguments
     if hasattr(args_cli, "seed") and args_cli.seed is not None:
         agent_cfg.seed = args_cli.seed
+    if getattr(args_cli, "device", None) is not None:
+        agent_cfg.device = args_cli.device
     if args_cli.resume is not None:
         agent_cfg.resume = args_cli.resume
     if args_cli.load_run is not None:
@@ -80,3 +87,14 @@ def update_rsl_rl_cfg(agent_cfg: RslRlOnPolicyRunnerCfg, args_cli: argparse.Name
         agent_cfg.neptune_project = args_cli.log_project_name
 
     return agent_cfg
+
+
+def resolve_checkpoint(log_root, load_run, checkpoint):
+    """Accept BC checkpoint paths as well as the usual run/checkpoint patterns."""
+    path = Path(checkpoint).expanduser()
+    if path.is_file():
+        return str(path.resolve())
+    if path.is_absolute() or path.parent != Path("."):
+        raise FileNotFoundError(f"Checkpoint does not exist: {path}")
+    from isaaclab_tasks.utils import get_checkpoint_path
+    return get_checkpoint_path(log_root, load_run, checkpoint)

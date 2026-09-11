@@ -57,6 +57,7 @@ class OnPolicyRunner:
         self.tot_timesteps = 0
         self.tot_time = 0
         self.current_learning_iteration = 0
+        self.demo_dataset_metadata = {}
         self.git_status_repos = [rsl_rl.__file__]
 
     def learn(self, num_learning_iterations: int, init_at_random_ep_len: bool = False) -> None:
@@ -296,6 +297,10 @@ class OnPolicyRunner:
             "iter": self.current_learning_iteration,
             "infos": infos,
         }
+        if self.alg.demos is not None:
+            saved_dict["dapg_state_dict"] = self.alg.dapg_state_dict()
+        if self.demo_dataset_metadata:
+            saved_dict["demo_dataset"] = self.demo_dataset_metadata
         # Save RND model if used
         if hasattr(self.alg, "rnd") and self.alg.rnd:
             saved_dict["rnd_state_dict"] = self.alg.rnd.state_dict()
@@ -307,7 +312,16 @@ class OnPolicyRunner:
             self.writer.save_model(path, self.current_learning_iteration)
 
     def load(self, path: str, load_optimizer: bool = True, map_location: str | None = None) -> dict:
-        loaded_dict = torch.load(path, weights_only=False, map_location=map_location)
+        loaded_dict = torch.load(path, weights_only=False, map_location=map_location or self.device)
+        infos = loaded_dict.get("infos") or {}
+        if infos.get("bc_pretrain"):
+            if infos.get("obs_mean") is not None or infos.get("obs_std") is not None:
+                raise ValueError("BC checkpoint uses external normalization; align it with the policy before loading")
+            if self.alg.policy.actor_obs_normalization or self.alg.policy.critic_obs_normalization:
+                raise ValueError("Raw-observation BC checkpoint requires observation normalization disabled")
+            # BC trained only actor parameters, PPO optimizes actor + critic + std.
+            load_optimizer = False
+            print("[BC] Loaded policy initialization; PPO optimizer starts fresh")
         # Load model
         resumed_training = self.alg.policy.load_state_dict(loaded_dict["model_state_dict"])
         # Load RND model if used
@@ -317,13 +331,25 @@ class OnPolicyRunner:
         if load_optimizer and resumed_training:
             # Algorithm optimizer
             self.alg.optimizer.load_state_dict(loaded_dict["optimizer_state_dict"])
+            # Adaptive KL scheduling must continue from the restored learning rate.
+            self.alg.learning_rate = self.alg.optimizer.param_groups[0]["lr"]
             # RND optimizer if used
             if hasattr(self.alg, "rnd") and self.alg.rnd:
                 self.alg.rnd_optimizer.load_state_dict(loaded_dict["rnd_optimizer_state_dict"])
         # Load current learning iteration
         if resumed_training:
             self.current_learning_iteration = loaded_dict["iter"]
-        return loaded_dict["infos"]
+        if "dapg_state_dict" in loaded_dict:
+            self.alg.load_dapg_state_dict(loaded_dict["dapg_state_dict"])
+        self.demo_dataset_metadata = loaded_dict.get("demo_dataset", {})
+        if infos.get("bc_pretrain"):
+            self.demo_dataset_metadata = {
+                key: infos[key] for key in (
+                    "env_name", "dataset_path", "dataset_sha256", "split_seed",
+                    "train_episode_indices", "val_episode_indices", "train_samples", "val_samples",
+                ) if key in infos
+            }
+        return infos
 
     def get_inference_policy(self, device: str | None = None) -> callable:
         self.eval_mode()  # Switch to evaluation mode (e.g. for dropout)
