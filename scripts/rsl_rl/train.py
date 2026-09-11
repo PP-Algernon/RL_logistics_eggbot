@@ -48,6 +48,8 @@ import gymnasium as gym
 import os
 import torch
 from datetime import datetime
+# DAPG: 优先使用项目内 fork 的 rsl_rl（third_party），改源码即时生效
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))), "third_party"))
 
 from rsl_rl.runners import OnPolicyRunner
 

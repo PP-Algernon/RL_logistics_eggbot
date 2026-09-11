@@ -112,8 +112,7 @@ cd /home/pu/isaac-sim
 
 **用法**：
 ```bash
-cd /home/pu/isaac-sim
-./isaaclab.sh -p /home/pu/RL-ws/ProjectLearning/Eggtart-logistics-robot/scripts/bc_pretrain.py \
+python /home/pu/RL-ws/ProjectLearning/Eggtart-logistics-robot/scripts/bc_pretrain.py \
     --data datasets/eggtart_demo.hdf5 \
     --output checkpoints/bc_pretrained.pt \
     --actor_hidden_dims 256 128 64 \

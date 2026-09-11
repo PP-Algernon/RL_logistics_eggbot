@@ -107,14 +107,20 @@ class MobileGraspSceneCfg(InteractiveSceneCfg):
     target = RigidObjectCfg(
         prim_path="{ENV_REGEX_NS}/Target",
         spawn=sim_utils.CuboidCfg(
-            size=(0.03, 0.03, 0.03),
+            size=(0.032, 0.032, 0.032),
             rigid_props=sim_utils.RigidBodyPropertiesCfg(
                 disable_gravity=False,  # 恢复重力，允许物体落地和被提起
-                linear_damping=0.5,      # 增加阻尼，降低滑动
-                angular_damping=0.5,     # 增加角阻尼，稳定旋转
+                linear_damping=0.8,      # 增加阻尼，降低滑动
+                angular_damping=0.8,     # 增加角阻尼，稳定旋转
             ),
-            mass_props=sim_utils.MassPropertiesCfg(mass=0.05),
+            mass_props=sim_utils.MassPropertiesCfg(mass=0.01),
             collision_props=sim_utils.CollisionPropertiesCfg(),
+            # 接触摩擦由材质决定，刚体阻尼只会衰减运动速度。
+            physics_material=sim_utils.RigidBodyMaterialCfg(
+                static_friction=1.0,
+                dynamic_friction=0.8,
+                restitution=0.0,
+            ),
             visual_material=sim_utils.PreviewSurfaceCfg(diffuse_color=(0.95, 0.75, 0.25)),
         ),
         init_state=RigidObjectCfg.InitialStateCfg(pos=(0.6, 0.0, 0.1)),

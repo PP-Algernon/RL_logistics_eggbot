@@ -1,6 +1,6 @@
 """Stage 0: Demonstration Data Collection for BC Pretraining
 
-Collects (observation, action) pairs using a scripted teacher policy.
+Collects (observation, action) pairs from successful scripted grasps only.
 The teacher implements:
 - Navigation: P-controller to approach target
 - Arm control: Follow scripted grasp posture
@@ -55,8 +55,8 @@ class ScriptedTeacher:
     2. REACH: 机械臂切换到 grasp 姿态
     3. CLOSING: 底盘停止，夹爪闭合
     4. HOLDING: 保持夹持
-    5. RETRACT: 机械臂线性插值回 nominal 姿态，验证物体抬升
-    6. DONE: 本次尝试结束，等待环境重置
+    5. RETRACT: 收回后保持，验证物体稳定抬升
+    6. DONE: 本次尝试结束，成功时继续夹持直到环境重置
     """
 
     ALIGN = 0
@@ -83,13 +83,14 @@ class ScriptedTeacher:
         target_tracking_distance: float = 0.20,  # 目标开始跟踪的距离（米）
         target_front_axis: tuple[float, float, float] = (0.0, -1.0, 0.0),  # 前方方向向量
         close_time: float = 2.00,                # 闭合超时（秒），碰撞阻塞不能靠延长等待解决
-        hold_time: float = 0.80,                 # 夹爪保持时间（秒）
+        hold_time: float = 1.80,                 # 夹爪保持时间（秒）
         retract_time: float = 1.00,              # 机械臂收回时间（秒）
         gripper_closed_threshold: float = 0.30,  # 闭合角参考阈值，爪尖接触另用持续停转判定
-        lift_height: float = 0.05,               # 抬起判定（米）：目标抬升超过此值才算成功
-        grasp_horiz_tol: float = 0.008,          # 30 mm 目标需要毫米级对准
+        lift_height: float = 0.15,               # 抬起判定（米）：目标抬升超过此值才算成功
+        grasp_horiz_tol: float = 0.008,           # 抓取判定水平容差（米）——配合 REACH 底盘微调
         grasp_z_tol: float = 0.02,              # 抓取判定 Z 容差（米）
         reach_timeout: float = 4.0,              # REACH 超时（秒）——臂伸不到位/判定不过则放弃，防爪全程张开干等
+        lift_hold_time: float = 0.5,            # 收回后继续夹持并验证的时间（秒）
     ):
         """初始化脚本化教师
 
@@ -114,6 +115,7 @@ class ScriptedTeacher:
             lift_height: 抬起判定（米）——目标抬升超过此值才算成功
             grasp_horiz_tol: 抓取判定水平容差（米）
             grasp_z_tol: 抓取判定 Z 容差（米）
+            lift_hold_time: 收回后须连续满足抬升高度的保持时间（秒）
         """
         self.env = env
         self.device = env.device
@@ -150,6 +152,7 @@ class ScriptedTeacher:
         self.hold_steps = max(1, int(round(hold_time / dt)))
         self.retract_steps = max(1, int(round(retract_time / dt)))
         self.reach_steps = max(1, int(round(reach_timeout / dt)))
+        self.lift_hold_steps = max(1, int(round(lift_hold_time / dt)))
 
         # State tracking
         self.state = torch.zeros(self.num_envs, dtype=torch.long, device=self.device)
@@ -162,7 +165,7 @@ class ScriptedTeacher:
         # 每 env 闭爪前的目标高度（用于抬起验证）与成功标记
         self.init_target_z = torch.zeros(self.num_envs, device=self.device)
         self.success = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
-        self.ever_lifted = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
+        self.lift_stable_steps = torch.zeros(self.num_envs, dtype=torch.long, device=self.device)
         self._debug_counter = 0
 
         # Resolve entity configs
@@ -554,9 +557,10 @@ class ScriptedTeacher:
         q = robot.data.joint_pos[:, self.gripper_joint_idx]
         # 关节已有隐式阻尼；30 Hz 下再用高增益显式 PD 会造成开度振荡。
         actions[opening, 8] = (0.8 - q[opening]).clamp(-0.3, 0.3)
-        # 30 mm / 50 g 目标用 0.3 Nm 保持；满力 1 Nm 在爪尖接触时容易
-        # 把物体挤出。DONE 后卸力，抓取成功仍由实际抬升验证。
+        # 保持 0.3 Nm 夹持力矩，成功后的 DONE 也持续施力，直到环境重置。
+        # 力控下 action=0 会卸力，并不表示保持当前开度。
         grasping = (self.state == self.CLOSING) | (self.state == self.HOLDING) | (self.state == self.RETRACT)
+        grasping |= (self.state == self.DONE) & self.success
         actions[grasping, 8] = -0.3
 
         self.step_in_state += 1
@@ -608,7 +612,7 @@ class ScriptedTeacher:
         状态转换（单向递进）：
         - CLOSING -> HOLDING: 闭合到位或出现持续停转后保持；超时 -> DONE
         - HOLDING -> RETRACT: 保持时间到，开始试抬
-        - RETRACT -> DONE: 收回完成；**期间物体曾被举起** -> success，否则失败
+        - RETRACT -> DONE: 收回后持续夹持并满足高度门槛 -> success，否则失败
 
         抬起验证放在 RETRACT 阶段：臂从 grasp 姿态收回 nominal 姿态，
         只有真夹住物体才会把它带离地面。
@@ -631,14 +635,16 @@ class ScriptedTeacher:
         contact_candidate |= ((self.step_in_state * self.dt) >= 0.8) & ((self.close_start_q - q) > 0.04)
         close_ready = gripper_closed | contact_candidate
 
-        # RETRACT 阶段记录"曾抬起"（允许收回途中物体短暂滑脱的边界情况）
-        retracting = self.state == self.RETRACT
-        self.ever_lifted[retracting] |= lifted[retracting]
+        # 收回后再观察一段时间，短暂越过高度门槛又掉落不算成功。
+        verifying = (self.state == self.RETRACT) & (self.step_in_state > self.retract_steps)
+        self.lift_stable_steps = torch.where(verifying & lifted, self.lift_stable_steps + 1, 0)
 
         # 成功路径
         to_hold = closing & close_ready
         to_retract = (self.state == self.HOLDING) & (self.step_in_state >= self.hold_steps)
-        to_done = (self.state == self.RETRACT) & (self.step_in_state >= self.retract_steps)
+        to_done = (self.state == self.RETRACT) & (
+            self.step_in_state >= self.retract_steps + self.lift_hold_steps
+        )
         # 超时失败路径（未夹住）
         close_timeout = closing & (self.step_in_state >= self.close_steps) & ~close_ready
 
@@ -652,10 +658,9 @@ class ScriptedTeacher:
                 self.state[mask] = next_state
                 self.step_in_state[mask] = 0
 
-        # 成功标记：RETRACT 完成且曾把目标举起
+        # 成功标记：收回后连续满足抬升高度，DONE 动作继续夹持。
         if to_done.any():
-            self.success[to_done] = self.ever_lifted[to_done]
-            self.ever_lifted[to_done] = False
+            self.success[to_done] = self.lift_stable_steps[to_done] >= self.lift_hold_steps
 
     def reset(self, env_ids: torch.Tensor | None = None):
         """重置指定环境的状态机
@@ -674,7 +679,7 @@ class ScriptedTeacher:
             self.close_start_q.zero_()
             self.contact_steps.zero_()
             self.success.zero_()
-            self.ever_lifted.zero_()
+            self.lift_stable_steps.zero_()
             self._place_target_in_front()
         else:
             self.state[env_ids] = 0
@@ -685,7 +690,7 @@ class ScriptedTeacher:
             self.close_start_q[env_ids] = 0.0
             self.contact_steps[env_ids] = 0
             self.success[env_ids] = False
-            self.ever_lifted[env_ids] = False
+            self.lift_stable_steps[env_ids] = 0
             self._place_target_in_front(env_ids)
 
 
@@ -769,17 +774,24 @@ def main():
         target_tracking_distance=0.20, # 目标开始跟踪的距离（米）
         target_front_axis=EGGTART_BASE_FORWARD_AXIS,  # 前方方向向量
         close_time=2.00,
-        hold_time=0.80,                # 夹爪保持时间（秒）
+        hold_time=1.80,                # 夹爪保持时间（秒）
         retract_time=1.50,             # 平缓抬起，避免把爪尖夹持的物体甩出
     )
+    print(f"  - 成功条件: 相对闭爪前抬升 {teacher.lift_height:.2f} m，收回后保持 "
+          f"{teacher.lift_hold_steps * teacher.dt:.2f} s；成功后持续夹持至重置")
 
     # Storage
     obs_buffer = []
     action_buffer = []
+    episode_lengths = []
     success_count = 0
     total_episodes = 0
     reach_timeout_count = 0
     close_timeout_count = 0
+    # 只保留成功轨迹：每个 env 维护当前 episode 的临时轨迹，
+    # 结束时 teacher.success 为 True 才拼入全局缓冲（失败轨迹丢弃，防止污染 BC）。
+    ep_obs: list[list[np.ndarray]] = [[] for _ in range(base_env.num_envs)]
+    ep_act: list[list[np.ndarray]] = [[] for _ in range(base_env.num_envs)]
 
     def _flatten_obs(obs):
         """把 gymnasium 返回的 obs（可能是 dict，键为观测组名）拼成 [num_envs, obs_dim] tensor。
@@ -788,14 +800,14 @@ def main():
         观测配置里只有一个 'policy' 组时，即该组本身。
         """
         if isinstance(obs, dict):
-            print(f"[INFO] obs 为 dict，键: {list(obs.keys())}") if not obs_buffer else None
             return torch.cat([obs[k] for k in obs.keys()], dim=-1)
         return obs
 
     # Reset
-    obs, _ = env.reset()
-    obs = _flatten_obs(obs)
+    env.reset()
     teacher.reset()
+    # teacher.reset 重新放置了目标，须刷新观测，避免首个样本仍指向旧目标。
+    obs = _flatten_obs(base_env.observation_manager.compute(update_history=False))
 
     # 打印第一个环境的初始位置信息（用于调试坐标系）
     robot = base_env.scene["robot"]
@@ -806,6 +818,27 @@ def main():
     rel_pos = target.data.root_pos_w[0] - robot.data.root_pos_w[0]
     print(f"  相对位置 (目标-机器人): {rel_pos.cpu().numpy()}")
     print(f"  水平距离: {torch.norm(rel_pos[:2]).item():.3f} 米\n")
+
+    # 记录每条成功轨迹的初始状态（供 replay_demo.py 精确回放）：
+    # 机器人 root 位姿/关节角 + 目标 root 位姿，轨迹保存时一并写入 hdf5
+    init_robot_pos = torch.zeros(base_env.num_envs, 3, device=base_env.device)
+    init_robot_quat = torch.zeros(base_env.num_envs, 4, device=base_env.device)
+    init_robot_joint = torch.zeros(base_env.num_envs, robot.num_joints, device=base_env.device)
+    init_target_pos = torch.zeros(base_env.num_envs, 3, device=base_env.device)
+    init_target_quat = torch.zeros(base_env.num_envs, 4, device=base_env.device)
+    init_robot_pos_list, init_robot_quat_list = [], []
+    init_robot_joint_list, init_target_pos_list, init_target_quat_list = [], [], []
+
+    def record_init_states(env_ids: torch.Tensor) -> None:
+        """记录指定 env 的当前状态作为其新 episode 的初始状态"""
+        idx = env_ids
+        init_robot_pos[idx] = robot.data.root_pos_w[idx].clone()
+        init_robot_quat[idx] = robot.data.root_quat_w[idx].clone()
+        init_robot_joint[idx] = robot.data.joint_pos[idx].clone()
+        init_target_pos[idx] = target.data.root_pos_w[idx].clone()
+        init_target_quat[idx] = target.data.root_quat_w[idx].clone()
+
+    record_init_states(torch.arange(base_env.num_envs, device=base_env.device))
 
     print("Starting data collection...")
 
@@ -820,6 +853,22 @@ def main():
         reach_timeout_count += (finished & (previous_state == teacher.REACH)).sum().item()
         close_timeout_count += (finished & (previous_state == teacher.CLOSING)).sum().item()
 
+        # 当前物理状态确认上一步轨迹的结果；仅保存已执行的动作。
+        # DONE 等待段不再采样，失败和未完成的轨迹也不进入数据集。
+        for i in torch.where(finished)[0].tolist():
+            if teacher.success[i].item() and ep_obs[i]:
+                obs_buffer.append(np.stack(ep_obs[i]))
+                action_buffer.append(np.stack(ep_act[i]))
+                episode_lengths.append(len(ep_obs[i]))
+                # 初始状态与轨迹一一对应（顺序与 episode_lengths 一致）
+                init_robot_pos_list.append(init_robot_pos[i].cpu().numpy())
+                init_robot_quat_list.append(init_robot_quat[i].cpu().numpy())
+                init_robot_joint_list.append(init_robot_joint[i].cpu().numpy())
+                init_target_pos_list.append(init_target_pos[i].cpu().numpy())
+                init_target_quat_list.append(init_target_quat[i].cpu().numpy())
+            ep_obs[i] = []
+            ep_act[i] = []
+
         # Add noise for exploration
         if args_cli.noise_scale > 0:
             noise = torch.randn_like(actions) * args_cli.noise_scale
@@ -831,9 +880,13 @@ def main():
         else:
             noisy_actions = actions
 
-        # Store data
-        obs_buffer.append(obs.cpu().numpy())
-        action_buffer.append(noisy_actions.cpu().numpy())
+        # Store data：先入各 env 的当前 episode 暂存
+        obs_np = obs.cpu().numpy()
+        act_np = noisy_actions.cpu().numpy()
+        for i in torch.where(teacher.state != teacher.DONE)[0].tolist():
+            # copy 避免一个 env 的切片一直持有整批环境的 NumPy 数组。
+            ep_obs[i].append(obs_np[i].copy())
+            ep_act[i].append(act_np[i].copy())
 
         # Step environment
         obs, rewards, terminated, truncated, infos = env.step(noisy_actions)
@@ -845,19 +898,29 @@ def main():
             reset_ids = torch.where(reset_mask)[0]
             # 尚未完成便被环境截断的尝试也计为失败，已结束的不要重复统计。
             total_episodes += (teacher.state[reset_ids] != teacher.DONE).sum().item()
+            # 未完成被截断：丢弃暂存轨迹
+            for i in reset_ids.tolist():
+                ep_obs[i] = []
+                ep_act[i] = []
             teacher.reset(reset_ids)
+            refreshed_obs = _flatten_obs(base_env.observation_manager.compute(update_history=False))
+            obs[reset_ids] = refreshed_obs[reset_ids]
+            # 新 episode 的初始状态以 reset 后的实际状态为准
+            record_init_states(reset_ids)
 
         # Progress
         if (step + 1) % 1000 == 0:
-            collected = (step + 1) * args_cli.num_envs
+            collected = sum(episode_lengths)
             success_rate = (success_count / max(total_episodes, 1)) * 100
-            print(f"Step {step+1}/{args_cli.max_steps} | Collected: {collected:,} samples | "
+            print(f"Step {step+1}/{args_cli.max_steps} | Kept: {collected:,} successful samples | "
                   f"Episodes: {total_episodes} | Success rate: {success_rate:.1f}%")
 
     # Concatenate buffers
     print("\nProcessing collected data...")
-    obs_array = np.concatenate(obs_buffer, axis=0)
-    action_array = np.concatenate(action_buffer, axis=0)
+    obs_array = np.concatenate(obs_buffer, axis=0) if obs_buffer else np.empty((0, obs.shape[-1]), dtype=np.float32)
+    action_array = np.concatenate(action_buffer, axis=0) if action_buffer else np.empty((0, 9), dtype=np.float32)
+    if not obs_buffer:
+        print("No successful trajectories completed; saving an empty dataset (failed/incomplete attempts excluded).")
 
     print(f"Total samples: {len(obs_array):,}")
     print(f"Observation shape: {obs_array.shape}")
@@ -874,6 +937,14 @@ def main():
     with h5py.File(args_cli.output, "w") as f:
         f.create_dataset("obs", data=obs_array, compression="gzip")
         f.create_dataset("action", data=action_array, compression="gzip")
+        f.create_dataset("episode_lengths", data=np.asarray(episode_lengths, dtype=np.int64))
+        # 每条成功轨迹的初始状态（供 replay_demo.py 精确回放）
+        if init_robot_pos_list:
+            f.create_dataset("init_robot_root_pos", data=np.stack(init_robot_pos_list), compression="gzip")
+            f.create_dataset("init_robot_root_quat", data=np.stack(init_robot_quat_list), compression="gzip")
+            f.create_dataset("init_robot_joint_pos", data=np.stack(init_robot_joint_list), compression="gzip")
+            f.create_dataset("init_target_root_pos", data=np.stack(init_target_pos_list), compression="gzip")
+            f.create_dataset("init_target_root_quat", data=np.stack(init_target_quat_list), compression="gzip")
 
         # Metadata
         f.attrs["env_name"] = args_cli.task
@@ -886,6 +957,10 @@ def main():
         f.attrs["successful_attempts"] = success_count
         f.attrs["reach_timeouts"] = reach_timeout_count
         f.attrs["close_timeouts"] = close_timeout_count
+        f.attrs["successful_only"] = True
+        f.attrs["saved_episodes"] = len(episode_lengths)
+        f.attrs["lift_height"] = teacher.lift_height
+        f.attrs["lift_hold_time"] = teacher.lift_hold_steps * teacher.dt
 
     env.close()
 
