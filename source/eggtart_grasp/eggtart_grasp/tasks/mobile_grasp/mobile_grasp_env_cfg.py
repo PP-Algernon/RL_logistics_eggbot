@@ -46,8 +46,10 @@ LIFT_HEIGHT_THRESHOLD = 0.12  # m (目标质心高度，降低到 12cm)
 # 提起后必须保持在高度阈值以上这么久才算稳定抓取
 LIFT_DWELL_TIME = 0.1  # s
 
-# 目标移动速度范围（用于随机初始速度和周期性速度变化）
-TARGET_VELOCITY_RANGE = 0.10  # m/s (±range，降低到原来的40%)
+# 采集教师和课程前两阶段共用：link_001 局部 -Y 为前方，X 为侧向。
+DEMO_TARGET_DISTANCE = 0.5  # m
+DEMO_TARGET_LATERAL = 0.0  # m
+DEMO_TARGET_HEIGHT = 0.10  # m，世界高度；生成后受重力落地
 
 # 抓取点落在这个距离内算"到达目标"
 GRASP_REACH_THRESHOLD = 0.1      # m (放宽让policy更容易触发grasp)
@@ -65,9 +67,8 @@ CURRICULUM_STAGE3_START_ITER = 2000
 CURRICULUM_STAGE4_START_ITER = 4000  
 
 # 逆向课程学习：三阶段目标初始位置和行为控制
-# 阶段 1 (step 0-36000, 1500 iter): 固定正前方 + 主动靠近夹爪（最简单）
-# 阶段 2 (step 36000-96000, 4000 iter): 固定正前方 + 静止（中等难度）
-# 阶段 3 (step 96000+, 4000+ iter): 随机位置 + 静止（完整任务）
+# 阶段 1/2 (0-6000 iter): 与采集一致的固定位置，不主动移动目标
+# 阶段 3 (6000+ iter): 扩大初始位置范围，继续由重力和接触决定运动
 ANTI_CURRICULUM_STAGE1_START_ITER = 0
 ANTI_CURRICULUM_STAGE2_START_ITER = 4000
 ANTI_CURRICULUM_STAGE3_START_ITER = 6000
@@ -211,54 +212,29 @@ class EventCfg:
         func=mdp.reset_target_curriculum,
         mode="reset",
         params={
-            # 阶段1: 固定在正前方
-            "stage1_pose_range": {"x": (0.6, 0.7), "y": (-0.05, 0.05), "z": (0.015, 0.020)},
+            # XY 使用 link_001 局部坐标，Z 使用世界高度；与采集教师一致。
+            "stage1_pose_range": {
+                "x": (DEMO_TARGET_LATERAL, DEMO_TARGET_LATERAL),
+                "y": (-DEMO_TARGET_DISTANCE, -DEMO_TARGET_DISTANCE),
+                "z": (DEMO_TARGET_HEIGHT, DEMO_TARGET_HEIGHT),
+            },
             # 阶段2: 固定在正前方（同阶段1位置）
-            "stage2_pose_range": {"x": (0.6, 0.7), "y": (-0.05, 0.05), "z": (0.015, 0.020)},
-            # 阶段3: 随机位置
-            "stage3_pose_range": {"x": (0.4, 1.2), "y": (-0.6, 0.6), "z": (0.015, 0.020)},
-            "velocity_range": {
-                "x": (-TARGET_VELOCITY_RANGE, TARGET_VELOCITY_RANGE),
-                "y": (-TARGET_VELOCITY_RANGE, TARGET_VELOCITY_RANGE),
+            "stage2_pose_range": {
+                "x": (DEMO_TARGET_LATERAL, DEMO_TARGET_LATERAL),
+                "y": (-DEMO_TARGET_DISTANCE, -DEMO_TARGET_DISTANCE),
+                "z": (DEMO_TARGET_HEIGHT, DEMO_TARGET_HEIGHT),
             },
-            "robot_cfg": SceneEntityCfg("robot"),
-            "stage2_start_step": ANTI_CURRICULUM_STAGE2_START_ITER*24,  # 阶段2开始：1500 iter
-            "stage3_start_step": ANTI_CURRICULUM_STAGE3_START_ITER*24,  # 阶段3开始：4000 iter（延后）
+            # 阶段3: 随机位置（泛化阶段）
+            "stage3_pose_range": {"x": (-0.6, 0.6), "y": (-1.2, -0.4), "z": (0.015, 0.020)},
+            "reference_cfg": SceneEntityCfg("robot", body_names="link_001"),
+            "stage2_start_step": ANTI_CURRICULUM_STAGE2_START_ITER*24,
+            "stage3_start_step": ANTI_CURRICULUM_STAGE3_START_ITER*24,
             "asset_cfg": SceneEntityCfg("target"),
         },
     )
-    # 阶段1专用：目标主动靠近夹爪（辅助学习精准抓取）
-    target_approach_stage1 = EventTerm(
-        func=mdp.target_approach_ee_direction,
-        mode="interval",
-        interval_range_s=(0.1, 0.2),  # 高频更新，实时跟踪末端
-        params={
-            "approach_speed": 0.05,  # 5 cm/s 缓慢靠近
-            "activation_distance": 0.15,  # 抓取点进入 15cm 内才触发
-            "stage1_end_step": ANTI_CURRICULUM_STAGE2_START_ITER*24,  # 阶段1结束步数：1500 iter
-            "robot_cfg": SceneEntityCfg("robot"),
-            "target_cfg": SceneEntityCfg("target"),
-            "ee_cfg": SceneEntityCfg("robot", body_names="link_005"),
-            "grasp_offset": EGGTART_EE_GRASP_OFFSET,
-            "direction_offset": EGGTART_EE_GRASP_DERECT_OFFSET,
-        },
-    )
-
-    # 禁用随机移动，让模型专注于精准抓取
-    randomize_target_velocity = EventTerm(
-        func=mdp.randomize_target_velocity,
-        mode="interval",
-        interval_range_s=(2.0, 4.0),
-        params={
-            "velocity_range": {
-                "x": (-TARGET_VELOCITY_RANGE, TARGET_VELOCITY_RANGE),
-                "y": (-TARGET_VELOCITY_RANGE, TARGET_VELOCITY_RANGE),
-            },
-            "stage2_start_step": 999999999,  # 永远不激活随机移动
-            "stage3_start_step": 999999999,
-            "asset_cfg": SceneEntityCfg("target"),
-        },
-    )
+    # 与采集一致：不施加靠近辅助或随机速度，物体仍受重力和接触影响。
+    target_approach_stage1 = None
+    randomize_target_velocity = None
 
 
 @configclass
@@ -670,4 +646,3 @@ class MobileGraspEnvCfg(ManagerBasedRLEnvCfg):
         self.viewer.eye = (4.0, 4.0, 3.0)
         # 仿真设置
         self.sim.dt = 1.0 / 120.0
-

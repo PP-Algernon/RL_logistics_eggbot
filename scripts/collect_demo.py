@@ -44,6 +44,12 @@ import eggtart_grasp.tasks.mobile_grasp  # noqa: F401
 # Isaac Lab imports
 from isaaclab.managers import SceneEntityCfg
 from isaaclab.utils.math import quat_apply, quat_conjugate
+from eggtart_grasp.tasks.mobile_grasp.mdp.target import place_target_in_reference_frame
+from eggtart_grasp.tasks.mobile_grasp.mobile_grasp_env_cfg import (
+    DEMO_TARGET_DISTANCE,
+    DEMO_TARGET_HEIGHT,
+    DEMO_TARGET_LATERAL,
+)
 
 
 class ScriptedTeacher:
@@ -76,9 +82,9 @@ class ScriptedTeacher:
         align_threshold: float = 0.1,            # 对齐完成的角度阈值（弧度，约5.7度）
         approach_threshold: float = 0.45,        # 开始伸手的距离阈值（米）
         grasp_joint_pos: list[float] | None = None,
-        target_spawn_distance: float = 0.7,      # 目标生成距离（米）
-        target_spawn_lateral: float = 0.0,       # 目标侧向偏移（米，正值为右侧）
-        target_spawn_height: float = 0.10,       # 目标生成高度（米）
+        target_spawn_distance: float = DEMO_TARGET_DISTANCE,
+        target_spawn_lateral: float = DEMO_TARGET_LATERAL,
+        target_spawn_height: float = DEMO_TARGET_HEIGHT,
         target_approach_speed: float = 0.0,      # 默认静止；环境内的辅助移动也须关闭
         target_tracking_distance: float = 0.20,  # 目标开始跟踪的距离（米）
         target_front_axis: tuple[float, float, float] = (0.0, -1.0, 0.0),  # 前方方向向量
@@ -280,16 +286,11 @@ class ScriptedTeacher:
         使用 link_001（机械臂基座）的位置和朝向作为参考坐标系，
         目标沿 link_001 局部系的 target_front_axis 方向（默认 -Y）生成。
         """
-        robot = self.env.scene["robot"]
         target = self.env.scene["target"]
         if env_ids is None:
             env_ids = torch.arange(self.num_envs, device=self.device, dtype=torch.long)
         if env_ids.numel() == 0:
             return
-
-        # 用 link_001（机械臂基座）作参考系，而不是 base_link root
-        link1_pos = robot.data.body_pos_w[env_ids, self.link1_cfg.body_ids[0]]
-        link1_quat = robot.data.body_quat_w[env_ids, self.link1_cfg.body_ids[0]]
 
         # 在 link_001 局部坐标系中构造目标位置
         # target_front_axis 定义了工作面方向（对 Eggtart 是 -Y 方向）
@@ -299,15 +300,10 @@ class ScriptedTeacher:
         # 侧向偏移沿局部 X 轴（垂直于前方方向）
         # 正值 = 面向工作面时的右侧，负值 = 左侧
         local_pos[:, 0] += self.target_spawn_lateral
-        local_pos[:, 2] = 0.0  # 高度在下面用世界系直接指定
-
-        # 转换到世界坐标系（XY 用 link_001 系旋转，Z 用世界系地面高度）
-        root_state = target.data.default_root_state[env_ids].clone()
-        root_state[:, 0:3] = link1_pos + quat_apply(link1_quat, local_pos)
-        # 生成高度使用世界系；目标随后自由落到地面。
-        root_state[:, 2] = self.target_spawn_height
-        root_state[:, 7:13] = 0.0  # 速度清零
-        target.write_root_state_to_sim(root_state, env_ids=env_ids)
+        local_pos[:, 2] = self.target_spawn_height
+        place_target_in_reference_frame(
+            self.env, env_ids, local_pos, self.link1_cfg, self.target_cfg
+        )
         # 记录目标初始高度（用于抬起验证）
         self.init_target_z[env_ids] = target.data.root_pos_w[env_ids, 2]
 
@@ -715,7 +711,6 @@ def main():
     # 教师采集/动作回放使用静止目标，关闭课程中的靠近辅助。
     env_cfg.events.target_approach_stage1 = None
     env_cfg.events.randomize_target_velocity = None
-    env_cfg.events.randomize_target_velocity = None
     env = gym.make(args_cli.task, cfg=env_cfg)
 
     # Unwrap to get base environment
@@ -745,9 +740,9 @@ def main():
     # 创建脚本化教师
     print(f"\n初始化 ScriptedTeacher 参数:")
     print(f"  - 前方方向向量: {EGGTART_BASE_FORWARD_AXIS}")
-    print(f"  - 目标生成距离: 0.5 米（沿 link_001 机械臂基座正前方）")
-    print(f"  - 目标侧向偏移: 0.0 米（正值=右侧，负值=左侧）")
-    print(f"  - 目标生成高度: 0.10 米")
+    print(f"  - 目标生成距离: {DEMO_TARGET_DISTANCE} 米（沿 link_001 机械臂基座正前方）")
+    print(f"  - 目标侧向偏移: {DEMO_TARGET_LATERAL} 米（正值=右侧，负值=左侧）")
+    print(f"  - 目标生成高度: {DEMO_TARGET_HEIGHT} 米")
     print(f"  - 目标主动靠近: 已关闭（采集时目标静止，防止底盘追目标绕圈）")
     print(f"  - 抓取点偏移: {collection_grasp_offset}（爪尖夹持区域）")
     print(f"  - 方向点偏移: {EGGTART_EE_GRASP_DERECT_OFFSET}\n")
@@ -760,9 +755,9 @@ def main():
         grasp_joint_pos=grasp_joint_pos_list,
         align_threshold=0.1,           # 对齐完成的角度阈值（弧度，约5.7度）
         approach_threshold=0.35,       # 在目标前留出下降空间，臂停稳后再微调靠近
-        target_spawn_distance=0.5,     # 目标生成距离（米，沿 link_001 正前方）
-        target_spawn_lateral=0.0,      # 目标侧向偏移（米，正值为右侧）
-        target_spawn_height=0.10,      # 目标生成高度（米，**世界系地面高度**，与 env init 一致）
+        target_spawn_distance=DEMO_TARGET_DISTANCE,
+        target_spawn_lateral=DEMO_TARGET_LATERAL,
+        target_spawn_height=DEMO_TARGET_HEIGHT,
         target_approach_speed=0.0,
         target_tracking_distance=0.20, # 目标开始跟踪的距离（米）
         target_front_axis=EGGTART_BASE_FORWARD_AXIS,  # 前方方向向量

@@ -1,13 +1,4 @@
-"""Moving-target event terms for the Eggtart mobile-grasp task.
-
-The target is spawned with gravity disabled (see the env scene cfg), so once given a horizontal
-velocity it coasts in a straight line at constant height -- a simple "moving target". The reset
-event randomises its start pose + velocity; the interval event periodically re-randomises its
-velocity so it changes direction during an episode.
-
-For positioning/velocity at reset, the stock ``mdp.reset_root_state_uniform`` is used directly in
-the env cfg; this module adds the periodic velocity re-randomisation.
-"""
+"""Target placement curriculum and optional target motion events."""
 
 from __future__ import annotations
 
@@ -171,39 +162,51 @@ def target_approach_ee_direction(
     target.write_root_velocity_to_sim(new_vel, env_ids=env_ids)
 
 
+def place_target_in_reference_frame(
+    env: ManagerBasedRLEnv,
+    env_ids: torch.Tensor,
+    positions: torch.Tensor,
+    reference_cfg: SceneEntityCfg,
+    asset_cfg: SceneEntityCfg,
+) -> None:
+    """Place a stationary target using reference-body XY and absolute world Z.
+
+    ``positions`` contains one (local x, local y, world z) row per env ID.
+    Collection and curriculum resets share this transform, including zero velocity.
+    """
+    from isaaclab.utils.math import quat_apply
+
+    robot = env.scene[reference_cfg.name]
+    asset: RigidObject = env.scene[asset_cfg.name]
+    body_id = reference_cfg.body_ids[0]
+    local_positions = positions.clone()
+    local_positions[:, 2] = 0.0
+    root_state = asset.data.default_root_state[env_ids].clone()
+    root_state[:, :3] = robot.data.body_pos_w[env_ids, body_id] + quat_apply(
+        robot.data.body_quat_w[env_ids, body_id], local_positions
+    )
+    root_state[:, 2] = positions[:, 2]
+    root_state[:, 7:13] = 0.0
+    asset.write_root_state_to_sim(root_state, env_ids=env_ids)
+
+
 def reset_target_curriculum(
     env: ManagerBasedRLEnv,
     env_ids: torch.Tensor,
     stage1_pose_range: dict[str, tuple[float, float]],
     stage2_pose_range: dict[str, tuple[float, float]],
     stage3_pose_range: dict[str, tuple[float, float]],
-    velocity_range: dict[str, tuple[float, float]],
     asset_cfg: SceneEntityCfg = SceneEntityCfg("target"),
-    robot_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
+    reference_cfg: SceneEntityCfg = SceneEntityCfg("robot", body_names="link_001"),
     stage2_start_step: int = 36000,
     stage3_start_step: int = 72000,
 ) -> None:
-    """三阶段逆课程学习：根据训练步数选择不同的目标初始位置范围
+    """按阶段采样位置：XY 为 link_001 局部坐标，Z 为世界高度，初速度为零。
 
-    所有阶段都使用相对于机器人的坐标系，确保每个并行环境都有独立的目标位置。
-
-    Args:
-        env: 环境实例
-        env_ids: 要重置的环境索引
-        stage1_pose_range: 阶段1位置范围（相对机器人坐标系）
-        stage2_pose_range: 阶段2位置范围（相对机器人坐标系）
-        stage3_pose_range: 阶段3位置范围（相对机器人坐标系）
-        velocity_range: 速度范围（通常设为0，因为有独立的速度控制）
-        asset_cfg: 目标实体配置
-        robot_cfg: 机器人实体配置
-        stage2_start_step: 阶段2开始步数
-        stage3_start_step: 阶段3开始步数
+    Eggtart 的前方为局部 -Y，侧向为局部 X，与采集教师一致。
     """
-    from isaaclab.assets import Articulation
-    from isaaclab.utils.math import quat_apply
 
     asset: RigidObject = env.scene[asset_cfg.name]
-    robot: Articulation = env.scene[robot_cfg.name]
 
     if env_ids is None:
         env_ids = asset._ALL_INDICES  # type: ignore[attr-defined]
@@ -219,30 +222,11 @@ def reset_target_curriculum(
     else:
         pose_range = stage3_pose_range
 
-    # 生成随机位置
-    root_state = asset.data.default_root_state[env_ids].clone()
-
-    # 位置采样（相对于机器人坐标系）
+    # XY 采样在参考连杆局部系，Z 直接指定相对世界地面的高度。
     position_samples = torch.zeros((n, 3), device=env.device)
     axis_to_col = {"x": 0, "y": 1, "z": 2}
     for axis, (lo, hi) in pose_range.items():
         col = axis_to_col[axis]
         position_samples[:, col] = torch.empty(n, device=env.device).uniform_(lo, hi)
 
-    # 转换到世界坐标系（所有阶段都相对于机器人）
-    robot_pos = robot.data.root_pos_w[env_ids]
-    robot_quat = robot.data.root_quat_w[env_ids]
-    position_samples_world = robot_pos + quat_apply(robot_quat, position_samples)
-    root_state[:, 0:3] = position_samples_world
-
-    # 速度采样（通常为0，由 randomize_target_velocity 单独控制）
-    velocity_samples = torch.zeros((n, 6), device=env.device)
-    for axis, (lo, hi) in velocity_range.items():
-        col = axis_to_col[axis]
-        velocity_samples[:, col] = torch.empty(n, device=env.device).uniform_(lo, hi)
-
-    root_state[:, 7:13] = velocity_samples
-
-    # 写入模拟器
-    asset.write_root_state_to_sim(root_state, env_ids=env_ids)
-
+    place_target_in_reference_frame(env, env_ids, position_samples, reference_cfg, asset_cfg)

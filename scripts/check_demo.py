@@ -139,7 +139,6 @@ def _replay(args_cli, simulation_app, act, ep_lens, ep_indices, init_states, lif
     env_cfg.sim.device = args_cli.device
     env_cfg.events.target_approach_stage1 = None
     env_cfg.events.randomize_target_velocity = None
-    env_cfg.events.randomize_target_velocity = None
 
     import gymnasium as gym
 

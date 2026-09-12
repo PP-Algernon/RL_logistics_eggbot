@@ -1,4 +1,4 @@
-"""Concrete Eggtart mobile-grasp environment config (train + play variants + static target)."""
+"""Concrete Eggtart configurations for standard PPO and BC/PPO."""
 
 from __future__ import annotations
 
@@ -8,7 +8,6 @@ from eggtart_grasp.assets.eggtart import EGGTART_CFG
 from eggtart_grasp.tasks.mobile_grasp.mobile_grasp_env_cfg import (
     BCCurriculumCfg,
     MobileGraspEnvCfg,
-    MobileGraspEnvStaticCfg,
 )
 
 
@@ -42,4 +41,3 @@ class EggtartMobileGraspEnvCfg_PLAY(EggtartMobileGraspEnvCfg):
         self.scene.num_envs = 50
         self.scene.env_spacing = 3.0
         self.observations.policy.enable_corruption = False
-

@@ -1,20 +1,20 @@
 # Eggtart 移动抓取：BC → PPO → DAPG
 
-任务：`Isaac-Mobile-Grasp-Eggtart-v0`。更新：2026-09-12。
+路线 B 任务：`Isaac-Mobile-Grasp-Eggtart-BCPPO-v0`；普通任务：`Isaac-Mobile-Grasp-Eggtart-v0`。更新：2026-09-12。
 
-## 唯一配置入口（2026-09-12）
+## 两种环境配置（2026-09-12）
 
-环境统一为 `mobile_grasp_env_cfg.py:MobileGraspEnvCfg`，只注册上面的任务名。
-路线 B 奖励已并入 `RewardsCfg`，新的 `CurriculumCfg.target_difficulty` 保留逆向课程，
-按 96,000 / 144,000 环境步切换“辅助靠近 → 静止目标 → 随机位置的静止目标”。
-阶段阈值只在这里配置；不再使用旧的奖励权重调度。所有抓取奖励从第 0 步启用。
+两种环境共用 `mobile_grasp_env_cfg.py:MobileGraspEnvCfg` 和原有 `RewardsCfg`。
+普通环境使用原 `CurriculumCfg` 分阶段调整奖励；BCPPO 使用新的 `BCCurriculumCfg`，从第 0 步启用路线 B 的七项奖励，其他项保持零权重。
+目标位置课程独立放在 `EventCfg.reset_target`，按 96,000 / 144,000 环境步切换阶段。
+前两阶段与采集的初始位置和速度一致，第三阶段泛化位置；所有阶段关闭主动靠近和随机速度。
 
-`Static / Play` 公开入口已删除；`MobileGraspEnvStaticCfg`、`config/eggtart/grasp_env_cfg.py` 和 `route_b_rewards.py` 保留，供两种环境复用。
+只注册上述两个任务，具体配置位于 `config/eggtart/grasp_env_cfg.py`；不再依赖 Static 配置和独立的 Route B 奖励配置。
 `BCCurriculumCfg` 位于 `mobile_grasp_env_cfg.py`，路线 B 仅通过它切换奖励权重。PPO 网络和优化器参数仍在
 `config/eggtart/agents/rsl_rl_ppo_cfg.py`；机器人资产参数仍在 `assets/eggtart.py`。
 
-旧任务名不再接受作为 `--task`；已有 HDF5 内的旧任务标签会在读取时迁移，
-不修改原文件或数据指纹。旧模型权重可继续加载，但当前 reward 和课程以唯一配置为准。
+Static 和 Play 旧任务名不再接受作为 `--task`；读取 HDF5 时分别映射到 BCPPO 和普通任务，BCPPO 标签保持原样，
+不修改原文件或数据指纹。旧模型权重可继续加载，奖励课程由所选任务决定。
 
 ## 当前检查结论
 
@@ -93,7 +93,7 @@ python $PROJECT/scripts/pretrain_bc.py \
 
 ```bash
 ./isaaclab.sh -p "$PROJECT/scripts/rsl_rl/train.py" \
-    --task Isaac-Mobile-Grasp-Eggtart-v0 \
+    --task Isaac-Mobile-Grasp-Eggtart-BCPPO-v0 \
     --num_envs 512 --max_iterations 50 --headless \
     --resume --checkpoint checkpoints/bc_pretrained.pt \
     --run_name bc_ppo_check
@@ -105,7 +105,7 @@ python $PROJECT/scripts/pretrain_bc.py \
 
 ```bash
 ./isaaclab.sh -p "$PROJECT/scripts/rsl_rl/train.py" \
-    --task Isaac-Mobile-Grasp-Eggtart-v0 \
+    --task Isaac-Mobile-Grasp-Eggtart-BCPPO-v0 \
     --num_envs 512 --max_iterations 50 --headless \
     --resume --checkpoint checkpoints/bc_pretrained.pt \
     --demo_data datasets/eggtart_demo.hdf5 \
@@ -133,22 +133,23 @@ python $PROJECT/scripts/pretrain_bc.py \
 
 `--max_iterations` 表示本次继续进行的更新次数。checkpoint 不保存物理仿真状态；重新启动后环境会重置，环境侧课程计数也从头开始，不能当作逐步完全复现的续训。
 
-## 阶段 3：正式训练前的环境差异检查（待处理）
+## 阶段 3：正式训练前的环境与评估检查
 
-现有数据可以用于 BC，但采集与训练环境不是完全相同的分布：
+前两阶段的初始场景已与采集对齐。成功口径仍须在正式策略评估时统一：
 
-| 条件 | 采集教师 | 当前统一环境 |
+| 条件 | 采集教师 | 当前两种环境 |
 |---|---|---|
-| 目标靠近辅助 | 关闭 | 阶段 1 仍开启，接近速度 0.05 m/s |
-| 初始目标位置 | 沿 link_001 前方 0.5 m，世界 z=0.10 m，随后落地 | 阶段 1 按机器人根坐标系 x=0.6–0.7 m、y=±0.05 m、z=0.015–0.020 m 采样 |
+| 目标靠近辅助 / 随机速度 | 关闭 / 关闭 | 全阶段关闭 / 关闭 |
+| 初始目标位置 | 沿 link_001 前方 0.5 m，世界 z=0.10 m，随后落地 | 前两阶段相同，共用放置函数，初速度为零 |
+| 第三阶段位置 | 教师仍使用固定位置 | link_001 局部 x=±0.6 m、y=-1.2 至 -0.4 m，世界 z=0.015-0.020 m |
 | 成功口径 | 相对闭爪前抬升 0.15 m，收回后连续保持 0.5 s | 奖励采用目标质心高度 0.12 m、保持 0.1 s |
 | 课程 | 教师固定采集流程 | 目标分布阶段 2/3 在 4000/6000 iteration 对应步数切换 |
 
-统一环境的 CurriculumCfg 只管理目标难度，奖励从第 0 步全部启用。训练 1500 次更新仍处于目标分布阶段 1。不能据此宣称已经覆盖所有课程阶段。
+`CurriculumCfg` 和 `BCCurriculumCfg` 管理各自的奖励权重，目标位置由重置事件管理。训练 1500 次更新仍处于目标分布阶段 1；第 6000 次更新对应的步数之后，下一次重置开始使用第三阶段位置。
 
 后续评估应先在与演示一致的初始状态、静止目标条件下检查 BC，再评估目标位置变化后的泛化。统计学习策略成功率时不要启用 `--scripted_grasp`，也不要把 episode reward 当作成功率。教师约 60% 的采集成功率与学习策略的实际成功率是不同指标。
 
-采集的 `approach_threshold=0.35` 是**进入伸手阶段的距离阈值，单位米**，不是夹爪闭合角度。当前采集入口 close/hold/retract 为 2.00/1.80/1.50 s，抓取就绪 xy/z 容差为 0.05/0.02 m。
+采集的 `approach_threshold=0.35` 是**进入伸手阶段的距离阈值，单位米**，不是夹爪闭合角度。当前采集入口 close/hold/retract 为 2.00/1.80/1.50 s，抓取就绪 xy/z 容差为 0.008/0.02 m。
 
 ## 阶段 4：正式 DAPG 训练（待执行）
 
@@ -156,8 +157,8 @@ python $PROJECT/scripts/pretrain_bc.py \
 
 ```bash
 ./isaaclab.sh -p "$PROJECT/scripts/rsl_rl/train.py" \
-    --task Isaac-Mobile-Grasp-Eggtart-v0 \
-    --num_envs 2048 --max_iterations 1500 --headles \
+    --task Isaac-Mobile-Grasp-Eggtart-BCPPO-v0 \
+    --num_envs 2048 --max_iterations 1500 --headless \
     --resume --checkpoint checkpoints/bc_pretrained.pt \
     --demo_data datasets/eggtart_demo.hdf5 \
     --bc_coef 0.1 --bc_decay 0.95 --bc_min_coef 0.001 \
@@ -172,7 +173,7 @@ python $PROJECT/scripts/pretrain_bc.py \
 
 ```bash
 ./isaaclab.sh -p "$PROJECT/scripts/rsl_rl/play.py" \
-    --task Isaac-Mobile-Grasp-Eggtart-v0 \
+    --task Isaac-Mobile-Grasp-Eggtart-BCPPO-v0 \
     --num_envs 16 --checkpoint checkpoints/bc_pretrained.pt
 ```
 
@@ -203,7 +204,7 @@ PYTHONPATH=/home/pu/miniconda3/envs/my_isaac_env/lib/python3.11/site-packages \
 
 `init_*` 用于还原演示初始场景；BC 监督训练主要依赖正确对应的 obs/action 和轨迹边界。缺少 init 状态不意味着数据一定不能训练，但会限制物理回放。本次文件含有 init 状态，无需因之前回放显示问题重新采集。
 
-2026-09-12 统一配置验证记录：
+2026-09-12 先前单环境版本的历史验证记录（不代表当前两种配置的验收）：
 
 - `/tmp/eggtart_unified_env.log`：真实环境检查阶段边界、位置采样、零初速、44/9 维接口和七项奖励。
 - `/tmp/eggtart_unified_bc_tests.log`：旧数据标签迁移与 BC/PPO/DAPG 回归。
@@ -211,6 +212,12 @@ PYTHONPATH=/home/pu/miniconda3/envs/my_isaac_env/lib/python3.11/site-packages \
 - `/tmp/eggtart_unified_replay.log`：读取旧任务标签并回放 episode 0，目标最终高度 0.216 m，相对位置最大偏差显示为 0。
 - `/tmp/eggtart_unified_collect.log`：16 环境、350 步小批采集，成功 10/16，保存 2,124 个样本至临时文件。
 - `/tmp/eggtart_unified_play.log`：唯一任务的策略播放、阶段 3 选择与两帧视频/模型导出检查。
+
+2026-09-12 当前两种环境与采集初态对齐验证：
+
+- `/tmp/eggtart_spawn_bc.log`、`/tmp/eggtart_spawn_standard.log`：两种环境均通过阶段边界、随机朝向下的教师位置一致性、零初速、第三阶段范围、局部重置和各自奖励课程检查。
+- `/tmp/eggtart_spawn_unit.log`：5 项 BC/PPO 回归测试通过。
+- `/tmp/eggtart_spawn_collect.log`：16 环境、350 步采集，成功 9/16，仅保存 9 条成功轨迹、1,859 个样本至 `/tmp/eggtart_spawn_collect.hdf5`。这是教师采集流程检查，不是学习策略成功率评估。
 
 ## 里程碑
 
