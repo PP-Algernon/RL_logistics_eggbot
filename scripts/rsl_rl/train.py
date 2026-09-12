@@ -111,7 +111,7 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
 
     Args:
         env_cfg: 环境配置
-        agent_cfg: 智能体（PPO）配置
+        agent_cfg: 智能体PPO配置
     """
     # 用非 Hydra 命令行参数覆盖配置
     agent_cfg = cli_args.update_rsl_rl_cfg(agent_cfg, args_cli)

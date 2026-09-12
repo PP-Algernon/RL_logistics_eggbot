@@ -13,13 +13,13 @@ from dataclasses import MISSING
 import isaaclab.sim as sim_utils
 from isaaclab.assets import ArticulationCfg, AssetBaseCfg, RigidObjectCfg
 from isaaclab.envs import ManagerBasedRLEnvCfg
-from isaaclab.managers import CurriculumTermCfg as CurrTerm
-from isaaclab.managers import EventTermCfg as EventTerm
-from isaaclab.managers import ObservationGroupCfg as ObsGroup
-from isaaclab.managers import ObservationTermCfg as ObsTerm
 from isaaclab.managers import RewardTermCfg as RewTerm
-from isaaclab.managers import SceneEntityCfg
+from isaaclab.managers import EventTermCfg as EventTerm
+from isaaclab.managers import ObservationTermCfg as ObsTerm
+from isaaclab.managers import ObservationGroupCfg as ObsGroup
+from isaaclab.managers import CurriculumTermCfg as CurrTerm
 from isaaclab.managers import TerminationTermCfg as DoneTerm
+from isaaclab.managers import SceneEntityCfg
 from isaaclab.scene import InteractiveSceneCfg
 from isaaclab.utils import configclass
 from isaaclab.utils.noise import AdditiveUniformNoiseCfg as Unoise
@@ -44,7 +44,7 @@ from eggtart_grasp.assets.eggtart import (
 LIFT_HEIGHT_THRESHOLD = 0.12  # m (目标质心高度，降低到 12cm)
 
 # 提起后必须保持在高度阈值以上这么久才算稳定抓取
-LIFT_DWELL_TIME = 0.1  # s
+LIFT_DWELL_TIME = 2.5  # s
 
 # 采集教师和课程前两阶段共用：link_001 局部 -Y 为前方，X 为侧向。
 DEMO_TARGET_DISTANCE = 0.5  # m
@@ -65,6 +65,7 @@ CURRICULUM_STAGE1_START_ITER = 0
 CURRICULUM_STAGE2_START_ITER = 750
 CURRICULUM_STAGE3_START_ITER = 2000
 CURRICULUM_STAGE4_START_ITER = 4000  
+CURRICULUM_DAPG_STAGE_START_ITER = 150
 
 # 逆向课程学习：三阶段目标初始位置和行为控制
 # 阶段 1/2 (0-6000 iter): 与采集一致的固定位置，不主动移动目标
@@ -139,10 +140,8 @@ class ActionsCfg:
         use_default_offset=True,
     )
     # 夹爪改为**力控**：策略输出夹持力，最终停在哪由接触自然决定，自适应物体体积。
-    # 位置控制下策略必须精确命令一个关节角，而"物体多大就该停在哪个角度"是几何决定的
-    # （实测 20/30/40 mm 物体分别停在 q=0.116/0.290/0.400），位置控制要么闭不到位、
-    # 要么把物体挤穿。详见 actions.py 的 GripperForceAction。
-    # max_effort 实测：0.3 Nm 能稳定夹住 30 mm 立方体，3.0 Nm 会把它挤穿。
+    # 位置控制下策略必须精确命令一个关节角，而"物体多大就该停在哪个角度"是几何决定的（实测 20/30/40 mm 物体分别停在 q=0.116/0.290/0.400）
+    # 位置控制要么闭不到位、要么把物体挤穿。详见 actions.py 的 GripperForceAction。
     gripper_action = mdp.GripperForceActionCfg(
         asset_name="robot",
         joint_names=[EGGTART_GRIPPER_JOINT_NAME],
@@ -239,12 +238,9 @@ class EventCfg:
 
 @configclass
 class RewardsCfg:
-    """简化的奖励项配置"""
-
     # ========== 阶段 1: 底盘导航（全程） ==========
     base_approach = RewTerm(
         func=mdp.base_to_target_xy_tanh,
-        weight=2.5,
         params={
             "std": 0.5,
             "standoff": 0.4,
@@ -256,7 +252,6 @@ class RewardsCfg:
     )
     base_facing = RewTerm(
         func=mdp.base_facing_target,
-        weight=1.2,
         params={
             "std": 0.6,
             "forward_axis": EGGTART_BASE_FORWARD_AXIS,
@@ -267,22 +262,17 @@ class RewardsCfg:
     )
     arm_comfort = RewTerm(
         func=mdp.arm_comfort,
-        weight=0.3,  # 降低权重，给探索空间
         params={
             "std": 1.0,
             "arm_cfg": SceneEntityCfg("robot", joint_names=EGGTART_ARM_JOINT_NAMES),
         },
     )
 
-
     # ========== 阶段 2: 机械臂到达 ==========
     # 双核 tanh：宽核(0.3)保远场引导，窄核(0.08)给近场精修。
-    # 单核 std=0.2 时 0.1m 处梯度已很平，实测策略推不动最后 10cm——
-    # 上一次训练抓取点最好也只到 0.099m，卡在 closure 门控边界外拿不到分，
-    # 随后（2900 迭代起）主动放弃伸手退回刷底盘分，ee_reach 从 2.71 崩到 0.29。
+    # 单核 std=0.2 时 0.1m 处梯度已很平，实测策略推不动最后 10cm
     ee_reach = RewTerm(
         func=mdp.ee_to_target_tanh,
-        weight=3.0,
         params={
             "std": 0.3,
             "narrow_std": 0.08,
@@ -292,14 +282,9 @@ class RewardsCfg:
             "grasp_offset": EGGTART_EE_GRASP_OFFSET,
         },
     )
-    # 近场精修（阶段 3 才由 curriculum 拉起权重，见 ee_precision_sched）
-    # ee_reach 的最窄核 std=0.08 在最后 2cm 内已经饱和：d 从 0.02 收到 0.005
-    # 只涨 0.019 分，被 action_rate / joint_vel 的噪声淹没，策略没动力再往里挤。
-    # 这一项用 std=0.02 的高斯核把陡峭区间挪到 0 附近（同样一段涨 0.36），
-    # 并在 support 处连续归零，5cm 外恒为 0，不改变已训好的远场引导形状。
+    # 近场精修
     ee_precision = RewTerm(
         func=mdp.ee_to_target_precision,
-        weight=5.0,
         params={
             "std": 0.02,
             # 与 GRASP_REACH_THRESHOLD 对齐：精修的作用域正好是"算到达"的那个球。
@@ -313,7 +298,6 @@ class RewardsCfg:
     )
     ee_distance = RewTerm(
         func=mdp.ee_to_target_distance_l2,
-        weight=-0.3,
         params={
             "ee_cfg": SceneEntityCfg("robot", body_names="link_005"),
             "target_cfg": SceneEntityCfg("target"),
@@ -323,7 +307,6 @@ class RewardsCfg:
     # 保留：末端朝向
     ee_orientation = RewTerm(
         func=mdp.ee_grasp_direction_alignment,
-        weight=2.5,
         params={
             "std": 0.5,
             "ee_cfg": SceneEntityCfg("robot", body_names="link_005"),
@@ -335,7 +318,6 @@ class RewardsCfg:
     # 保留：抓取姿态引导
     grasp_posture_guide = RewTerm(
         func=mdp.grasp_posture_guide,
-        weight=4.0,  # 提高权重
         params={
             "target_joint_pos": EGGTART_GRASP_JOINT_POS,
             "std": 1.0,
@@ -352,14 +334,7 @@ class RewardsCfg:
     # gate_blend 由 curriculum 控制：前期=0（抓空也给分，大胆闭），后期渐进到 1（必须夹住）
     gripper_closure_reward = RewTerm(
         func=mdp.gripper_closure_bonus,
-        weight=15.0,
         params={
-            # 10cm → 15cm。上次训练抓取点最好只到 0.099m，在 R=0.10 下
-            # proximity=sqrt(1-0.099/0.10)≈0.10，闭合满分也只得 1.5 分，
-            # 被 ee_reach(w=5) 完全淹没，closure 全程 5999 点恒为 0。
-            # R=0.15 让同样的 0.099m 得 proximity=0.583（满分 8.75），
-            # 足以压过"退回原地刷 base_approach"的局部最优。
-            # 放宽带来的"稍远处也能拿分"由 gate_blend 后期收紧（必须真夹住）来补。
             "reach_threshold": 0.15,
             "ee_cfg": SceneEntityCfg("robot", body_names="link_005"),
             "gripper_cfg": SceneEntityCfg("robot", joint_names=[EGGTART_GRIPPER_JOINT_NAME]),
@@ -375,18 +350,16 @@ class RewardsCfg:
         },
     )
     # 提升奖励
-    # gripper_open_pos 必须是**张开**端的关节角（1.0），不是闭合端。
-    # 之前误传 0.05（闭合端）导致 span = 0.05-0.35 = -0.3 为负，闭合门控整体反号：
-    # 夹爪全张开时 closure=1.0 拿满分、闭合时 closure=0.0，权重 30 的这一项
-    # 实际在奖励"张开"，压过权重 15 的 gripper_closure_reward，
-    # 策略于 ~1735 迭代收敛到永久张开（TensorBoard 里 closure 此后恒为 0）。
     target_lift_progress = RewTerm(
         func=mdp.target_lift_progress,
-        weight=30.0,
         params={
             "target_height": LIFT_HEIGHT_THRESHOLD,
             "std": 0.05,
             "target_cfg": SceneEntityCfg("target"),
+            "ee_cfg": SceneEntityCfg("robot", body_names="link_005"),
+            "grasp_offset": EGGTART_EE_GRASP_OFFSET,
+            "hold_dist": 0.2,
+            "max_speed": 3.6,
             "gripper_cfg": SceneEntityCfg("robot", joint_names=[EGGTART_GRIPPER_JOINT_NAME]),
             "gripper_closed_threshold": GRIPPER_CLOSED_THRESHOLD,
             "gripper_open_pos": EGGTART_GRIPPER_OPEN,
@@ -395,30 +368,29 @@ class RewardsCfg:
     # 稀疏抓取奖励
     grasp = RewTerm(
         func=mdp.grasp_bonus_lift,
-        weight=30.0,
         params={
             "lift_height_threshold": LIFT_HEIGHT_THRESHOLD,
             "lift_dwell_time": LIFT_DWELL_TIME,
             "target_cfg": SceneEntityCfg("target"),
+            "ee_cfg": SceneEntityCfg("robot", body_names="link_005"),
+            "grasp_offset": EGGTART_EE_GRASP_OFFSET,
+            "hold_dist": 0.2,
+            "max_speed": 3.6,
         },
     )
 
     # ========== 约束项（全程） ==========
     # 治 bang-bang 抖动：罚动作指令的跳变。
     # 臂+爪 6 维在 ±1 间来回跳时 action_rate_l2 ≈ 24，-0.02 让代价约 0.48，
-
     action_rate = RewTerm(
         func=mdp.action_rate_l2, 
-        weight=-0.02
     )
     joint_limits = RewTerm(
         func=mdp.joint_pos_limits,
-        weight=-0.5,
         params={"asset_cfg": SceneEntityCfg("robot", joint_names=EGGTART_ARM_JOINT_NAMES)},
     )
     joint_vel = RewTerm(
         func=mdp.joint_vel_l2,
-        weight=-0.005,
         params={
             "asset_cfg": SceneEntityCfg(
                 "robot", joint_names=EGGTART_ARM_JOINT_NAMES + [EGGTART_GRIPPER_JOINT_NAME]
@@ -427,7 +399,6 @@ class RewardsCfg:
     )
     base_vel = RewTerm(
         func=mdp.base_velocity_l2,
-        weight=-0.5,
         params={
             "standoff": 0.5,  # 与 base_approach 保持一致
             "arrive_tol": 0.15,
@@ -530,18 +501,13 @@ class CurriculumCfg:
 
 @configclass
 class BCCurriculumCfg:
-    """BC 预训练后的路线 B 奖励课程，与普通环境共用 RewardsCfg。
-
-    第 0 步即启用接近、姿态、举升、抓取和两项正则，不重新等待导航课程。
-    其余奖励保留定义，权重设为零；不继承普通课程，避免后期重新启用。
-    目标逆向课程仍由 EventCfg 按 ANTI_CURRICULUM_* 阈值独立控制。
+    """BC 预训练后的课程
     """
 
     base_approach_sched = CurrTerm(
         func=mdp.reward_weight_schedule,
         params={"term_name": "base_approach", "schedule": [(0, 1.0)]},
     )
-
     base_facing_sched = CurrTerm(
         func=mdp.reward_weight_schedule,
         params={"term_name": "base_facing", "schedule": [(0, 0.0)]},
@@ -549,32 +515,28 @@ class BCCurriculumCfg:
 
     arm_comfort_sched = CurrTerm(
         func=mdp.reward_weight_schedule,
-        params={"term_name": "arm_comfort", "schedule": [(0, 0.0)]},
+        params={"term_name": "arm_comfort", "schedule": [(0, 0.3)]},
+    )
+    grasp_posture_guide_sched = CurrTerm(
+            func=mdp.reward_weight_schedule,
+            params={"term_name": "grasp_posture_guide", "schedule": [(0, 1.5)]},
     )
 
     ee_reach_sched = CurrTerm(
         func=mdp.reward_weight_schedule,
         params={"term_name": "ee_reach", "schedule": [(0, 2.0)]},
     )
-
     ee_orientation_sched = CurrTerm(
         func=mdp.reward_weight_schedule,
         params={"term_name": "ee_orientation", "schedule": [(0, 0.0)]},
     )
-
-    grasp_posture_guide_sched = CurrTerm(
+    ee_precision_sched = CurrTerm(
         func=mdp.reward_weight_schedule,
-        params={"term_name": "grasp_posture_guide", "schedule": [(0, 1.5)]},
+        params={"term_name": "ee_precision", "schedule": [(0, 1.0)]},
     )
-
     ee_distance_sched = CurrTerm(
         func=mdp.reward_weight_schedule,
         params={"term_name": "ee_distance", "schedule": [(0, 0.0)]},
-    )
-
-    ee_precision_sched = CurrTerm(
-        func=mdp.reward_weight_schedule,
-        params={"term_name": "ee_precision", "schedule": [(0, 0.0)]},
     )
 
     gripper_closure_reward_sched = CurrTerm(
@@ -584,9 +546,8 @@ class BCCurriculumCfg:
 
     target_lift_progress_sched = CurrTerm(
         func=mdp.reward_weight_schedule,
-        params={"term_name": "target_lift_progress", "schedule": [(0, 10.0)]},
+        params={"term_name": "target_lift_progress", "schedule": [(0, 20.0)]},
     )
-
     grasp_sched = CurrTerm(
         func=mdp.reward_weight_schedule,
         params={"term_name": "grasp", "schedule": [(0, 30.0)]},
@@ -599,7 +560,7 @@ class BCCurriculumCfg:
 
     joint_vel_sched = CurrTerm(
         func=mdp.reward_weight_schedule,
-        params={"term_name": "joint_vel", "schedule": [(0, 0.0)]},
+        params={"term_name": "joint_vel", "schedule": [(0, -0.01)]},
     )
 
     action_rate_sched = CurrTerm(
@@ -609,7 +570,7 @@ class BCCurriculumCfg:
 
     base_vel_sched = CurrTerm(
         func=mdp.reward_weight_schedule,
-        params={"term_name": "base_vel", "schedule": [(0, 0.0)]},
+        params={"term_name": "base_vel", "schedule": [(0, -0.01)]},
     )
 
 
@@ -639,6 +600,19 @@ class MobileGraspEnvCfg(ManagerBasedRLEnvCfg):
     curriculum: CurriculumCfg = CurriculumCfg()
 
     def __post_init__(self):
+        # cfg.validate() 先于 CurriculumManager 创建，奖励权重不能留作 MISSING。
+        # 从当前课程（普通 PPO / BCPPO）读取初值，权重仍只在课程表中维护。
+        for term in vars(self.curriculum).values():
+            if isinstance(term, CurrTerm) and term.func is mdp.reward_weight_schedule:
+                schedule = sorted(term.params["schedule"], key=lambda item: item[0])
+                weight = schedule[0][1]
+                for start_step, value in schedule:
+                    if start_step <= 0:
+                        weight = value
+                    else:
+                        break
+                getattr(self.rewards, term.params["term_name"]).weight = weight
+
         # 通用设置
         self.decimation = 4
         self.episode_length_s = 10.0

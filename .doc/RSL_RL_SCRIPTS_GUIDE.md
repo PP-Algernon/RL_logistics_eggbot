@@ -167,12 +167,10 @@ logs/rsl_rl/eggtart_mobile_grasp/<timestamp>/videos/train/
 
 ```bash
 ./isaaclab.sh -p /home/pu/RL-ws/ProjectLearning/Eggtart-logistics-robot/scripts/rsl_rl/play.py \
-    --task Isaac-Mobile-Grasp-Eggtart-Static-v0 \
+    --task Isaac-Mobile-Grasp-Eggtart-BCPPO-v0 \
     --num_envs 16 \
-    --load_run 2026-09-09_14-37-10 \
     --checkpoint model_1000.pt \
-    --curriculum_stage 3 \
-    --scripted_grasp
+    --load_run 2026-09-09_14-37-10 
 ```
 
 如果想录制这次回放：

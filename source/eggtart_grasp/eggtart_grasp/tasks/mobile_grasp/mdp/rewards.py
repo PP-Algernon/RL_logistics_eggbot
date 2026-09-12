@@ -929,19 +929,11 @@ def ee_lift_when_near(
 
 
 class GraspBonusLift(ManagerTermBase):
-    """基于提起高度的稀疏抓取奖励：目标必须被提起到指定高度并保持一段时间
+    """目标在抓取点附近低速举升并连续保持时，给予稀疏抓取奖励。
 
-    不再依赖夹爪角度闭合判断，而是直接检测目标物体的高度：
-      - 目标质心高度 >= lift_height_threshold
-      - 连续保持 >= lift_dwell_time 秒
-      - 满足条件后给予 1.0 奖励
-
-    计数器是 per-env 的，目标低于阈值时立刻归零（要求连续保持）。
-    Episode 重置时计数器自动清零。
-
-    **为什么改用高度判定**：
-        力控夹爪下，夹住物体时夹爪被物体挡住，关节角度根本到不了预设阈值。
-        而抓取的真正目标是"提起物体"，高度是客观可测的物理量，不受夹爪机械特性影响。
+    高度、三维距离和速度必须同时达标；任一条件失效即清零保持时间。
+    三维距离排除垂直脱手，速度门控排除仍在夹爪附近的高速甩动。
+    每个环境独立计时，episode 重置时清零。
     """
 
     def __init__(self, cfg: RewardTermCfg, env: ManagerBasedRLEnv):
@@ -962,6 +954,10 @@ class GraspBonusLift(ManagerTermBase):
         lift_height_threshold: float,
         lift_dwell_time: float,
         target_cfg: SceneEntityCfg,
+        ee_cfg: SceneEntityCfg = SceneEntityCfg("robot", body_names="end_effector"),
+        grasp_offset: tuple[float, float, float] | None = None,
+        hold_dist: float = 0.2,
+        max_speed: float = 3.6,
     ) -> torch.Tensor:
         """
         Args:
@@ -969,24 +965,28 @@ class GraspBonusLift(ManagerTermBase):
             lift_height_threshold: 目标质心必须达到的高度（米）
             lift_dwell_time: 必须保持在高度阈值以上的时间（秒）
             target_cfg: 目标物体实体配置
+            ee_cfg: 抓取点参考连杆配置
+            grasp_offset: 抓取点相对参考连杆的局部偏移
+            hold_dist: 物块到抓取点的最大三维距离（米）
+            max_speed: 目标最大线速度（米/秒）
 
         Returns:
             shape (num_envs,) 的奖励张量，0 或 1
         """
         target: RigidObject = env.scene[target_cfg.name]
 
-        # 1) 高度判断：目标质心的 Z 坐标
         target_z = target.data.root_pos_w[:, 2]
-        lifted = target_z >= lift_height_threshold
+        held_near = _ee_to_target_distance(env, ee_cfg, target_cfg, grasp_offset) < hold_dist
+        slow = torch.linalg.vector_norm(target.data.root_lin_vel_w, dim=1) < max_speed
+        lifted = (target_z >= lift_height_threshold) & held_near & slow
 
-        # 2) 更新保持计数：在阈值以上 -> +dt，否则归零
+        # 脱手或高速甩动会打断连续保持，重新满足条件后必须重新计时。
         dt = env.step_dt
         self._lift_counter = torch.where(
             lifted, self._lift_counter + dt, torch.zeros_like(self._lift_counter)
         )
 
-        # 3) 只有保持时间 >= lift_dwell_time 才算成功
-        success = self._lift_counter >= lift_dwell_time
+        success = lifted
 
         return success.float()
 
@@ -1245,8 +1245,12 @@ def target_lift_progress(
     std: float = 0.05,
     gripper_closed_threshold: float = 0.35,
     gripper_open_pos: float = 1.0,  # 张开端；必须 > gripper_closed_threshold
+    ee_cfg: SceneEntityCfg = SceneEntityCfg("robot", body_names="end_effector"),
+    grasp_offset: tuple[float, float, float] | None = None,
+    hold_dist: float = 0.2,
+    max_speed: float = 3.6,
 ) -> torch.Tensor:
-    """渐进式目标提升奖励：目标物体提得越高，奖励越多（需要夹爪闭合）
+    """渐进式目标提升奖励：物块须靠近抓取点且低速运动，并按夹爪闭合度门控。
 
     **重要修改**：使用渐进式闭合门控（连续值），而非二值门控。
     防止"推目标"欺骗行为的同时，提供密集梯度引导夹爪逐渐闭合。
@@ -1276,6 +1280,10 @@ def target_lift_progress(
         std: 高斯核标准差（m），控制奖励的平滑度
         gripper_closed_threshold: 夹爪闭合阈值，小于此值算完全闭合
         gripper_open_pos: 夹爪完全**张开**的关节角（须 > gripper_closed_threshold）
+        ee_cfg: 抓取点参考连杆配置
+        grasp_offset: 抓取点相对参考连杆的局部偏移
+        hold_dist: 物块到抓取点的最大三维距离（米）
+        max_speed: 目标最大线速度（米/秒）
 
     Returns:
         奖励张量，夹爪闭合度 × 提升奖励，范围 [0, 1]
@@ -1318,7 +1326,11 @@ def target_lift_progress(
     # 如果提升量太小（<5mm，仍在地面），不给奖励
     reward = torch.where(lift_amount > 0.005, reward, torch.zeros_like(reward))
 
+    # 与稀疏奖励一致，脱手或高速甩动时不给举升进度奖励。
+    held_near = _ee_to_target_distance(env, ee_cfg, target_cfg, grasp_offset) < hold_dist
+    slow = torch.linalg.vector_norm(target.data.root_lin_vel_w, dim=1) < max_speed
+    reward = torch.where(held_near & slow, reward, torch.zeros_like(reward))
+
     # 渐进式门控：夹爪闭合越多，奖励越大（提供密集梯度）
     return gripper_closure * reward
-
 

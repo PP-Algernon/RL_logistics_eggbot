@@ -24,12 +24,7 @@
 关于步数单位：
     课程用 ``env.common_step_counter`` 计时，它每次 ``env.step()`` 加 1，与
     ``num_envs`` 无关。所以 ``迭代数 = common_step_counter / num_steps_per_env``。
-    本项目 ``num_steps_per_env = 24``（见 agents/rsl_rl_ppo_cfg.py），因此：
-
-        迭代 500  -> step 12000
-        迭代 1000 -> step 24000
-
-    改了 ``num_steps_per_env`` 就要同步改 env-cfg 里的阈值。
+    本项目 ``num_steps_per_env = 24``（见 agents/rsl_rl_ppo_cfg.py）
 
 关于生效时机：
     ``CurriculumManager.compute()`` 只在 ``ManagerBasedRLEnv._reset_idx()`` 里被调用，

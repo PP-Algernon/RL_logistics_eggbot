@@ -25,6 +25,7 @@ import argparse
 import os
 import sys
 import time
+import traceback
 
 # When launched through a Kit Python that does not have Isaac Lab installed as
 # an editable package, isaaclab.sh still exposes ISAACLAB_PATH.  Add its source
@@ -123,6 +124,12 @@ def main() -> None:
     try:
         _replay(args_cli, simulation_app, act, ep_lens, ep_indices,
                 (init_rp, init_rq, init_jp, init_tp, init_tq), lift_height, has_obs)
+    except BaseException:
+        # Kit shutdown can terminate Python before an unhandled exception is
+        # printed. Report it before closing the application.
+        traceback.print_exc()
+        sys.stderr.flush()
+        raise
     finally:
         simulation_app.close()
 

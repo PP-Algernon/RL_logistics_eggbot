@@ -1,4 +1,4 @@
-"""Isaac integration check for task registration, rewards and collection-aligned resets.
+"""Isaac integration check for target resets, reward gates and drop termination.
 
 Run through isaaclab.sh -p with --task and --headless, once per task.
 """
@@ -99,10 +99,97 @@ try:
     torch.testing.assert_close(target.data.root_pos_w[ids], expected, atol=1e-5, rtol=0)
     assert standard_cfg.curriculum.grasp_sched.params["schedule"][0] == (0, 0.0)
     assert bc_cfg.curriculum.grasp_sched.params["schedule"] == [(0, 30.0)]
-    print(f"PASS: {args.task} integration complete, including partial resets", flush=True)
+    # Controlled physical states: distinguish held objects from vertical throws
+    # (including the low-speed apex) and nearby objects moving too fast.
+    env.reset()
+    grasp_cfg = env.reward_manager.get_term_cfg("grasp")
+    progress_cfg = env.reward_manager.get_term_cfg("target_lift_progress")
+    drop_cfg = env.termination_manager.get_term_cfg("target_dropped")
+    assert not drop_cfg.time_out
+    for reward_cfg in (grasp_cfg, progress_cfg):
+        assert robot.body_names[reward_cfg.params["ee_cfg"].body_ids[0]] == "link_005"
+        assert reward_cfg.params["grasp_offset"] == cfg.rewards.ee_reach.params["grasp_offset"]
+
+    # The dense lift term also requires gripper closure.
+    joints = robot.data.joint_pos.clone()
+    joints[:, progress_cfg.params["gripper_cfg"].joint_ids[0]] = 0.25
+    robot.write_joint_state_to_sim(joints, torch.zeros_like(joints))
+
+    ee = grasp_cfg.params["ee_cfg"].body_ids[0]
+    grasp_offset = torch.tensor(grasp_cfg.params["grasp_offset"], device=env.device).expand(16, -1)
+
+    def grasp_positions():
+        return robot.data.body_pos_w[:, ee] + quat_apply(robot.data.body_quat_w[:, ee], grasp_offset)
+
+    # Translate the robot so the grasp point is at a known lifted height.
+    # No physics step is taken during these controlled reward checks.
+    root_pose = robot.data.root_state_w[:, :7].clone()
+    root_pose[:, 2] += 0.25 - grasp_positions()[:, 2]
+    robot.write_root_pose_to_sim(root_pose)
+    held_positions = grasp_positions().clone()
+    torch.testing.assert_close(held_positions[:, 2], torch.full((16,), 0.25, device=env.device))
+    held_state = target.data.root_state_w.clone()
+    held_state[:, :3] = held_positions
+    held_state[:, 7:13] = 0.0
+    thrown_state = held_state.clone()
+    thrown_state[1, 2] += 0.20  # Same XY, slow at the apex, but vertically detached.
+    thrown_state[2, 9] = 1.3  # Close to grasp point, but moving upward too fast.
+    thrown_state[3, 0] += 0.20  # Horizontal detachment.
+    target.write_root_state_to_sim(thrown_state)
+    grasp_cfg.func.reset()
+    for _ in range(5):
+        bonus = grasp_cfg.func(env, **grasp_cfg.params)
+    progress = progress_cfg.func(env, **progress_cfg.params)
+    assert bonus[0] == 1 and progress[0] > 0
+    assert (bonus[1:4] == 0).all() and (progress[1:4] == 0).all()
+
+    # Invalid conditions immediately interrupt a previously successful hold.
+    target.write_root_state_to_sim(held_state)
+    for _ in range(5):
+        bonus = grasp_cfg.func(env, **grasp_cfg.params)
+    assert (bonus == 1).all()
+    target.write_root_state_to_sim(thrown_state)
+    assert (grasp_cfg.func(env, **grasp_cfg.params)[1:4] == 0).all()
+    target.write_root_state_to_sim(held_state)
+    bonus = grasp_cfg.func(env, **grasp_cfg.params)
+    assert bonus[0] == 1 and (bonus[1:4] == 0).all()  # Must rebuild dwell time.
+    for _ in range(5):
+        bonus = grasp_cfg.func(env, **grasp_cfg.params)
+    assert (bonus == 1).all()
+    env.reward_manager.reset(env_ids=torch.tensor([0], device=env.device))
+    bonus = grasp_cfg.func(env, **grasp_cfg.params)
+    assert bonus[0] == 0 and bonus[1] == 1
+
+    # Initial free fall must not terminate an episode. Lifting then dropping must.
+    env.termination_manager.reset()
+    state = held_state.clone()
+    state[:, 2] = 0.10
+    target.write_root_state_to_sim(state)
+    assert not drop_cfg.func(env, **drop_cfg.params).any()
+    state[:, 2] = 0.016
+    target.write_root_state_to_sim(state)
+    assert not drop_cfg.func(env, **drop_cfg.params).any()
+    state[:3, 2] = 0.13
+    target.write_root_state_to_sim(state)
+    assert not drop_cfg.func(env, **drop_cfg.params).any()
+    env.termination_manager.reset(env_ids=torch.tensor([1], device=env.device))
+    state[:2, 2] = 0.04  # Env 0 dropped; env 1 belongs to a new episode.
+    target.write_root_state_to_sim(state)
+    env.termination_manager.compute()
+    dropped = env.termination_manager.get_term("target_dropped")
+    assert dropped[0] and not dropped[1:].any()
+    assert env.termination_manager.terminated[0]
+    assert not env.termination_manager.time_outs[0]
+    env.reset()
+    assert not drop_cfg.func._was_lifted.any()
+    assert not grasp_cfg.func._lift_counter.any()
+    print(f"PASS: {args.task} held/vertical throw/fast throw/dwell/drop/reset checks", flush=True)
+    print(f"PASS: {args.task} integration complete", flush=True)
     env.close()
 except BaseException:
     traceback.print_exc()
+    if "env" in globals():
+        env.close()
     raise
 finally:
     app.close()
