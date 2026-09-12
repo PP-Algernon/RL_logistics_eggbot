@@ -1,3 +1,5 @@
+> 历史记录：2026-09-12 配置合并后，本文的旧环境名、配置类和奖励调度不再适用。当前唯一环境为 `Isaac-Mobile-Grasp-Eggtart-v0`，请以[训练清单](../TODO_BC_PPO_DAPG.md)为准。
+
 # 路线 B 实施手册：BC 预训练 + PPO 微调（Eggtart 移动抓取）
 
 > 定位：在**不动算法栈**（RSL-RL / PPO）的前提下，用演示数据做行为克隆（Behavior Cloning）预训练 warm-start，再用 PPO 微调，把成功率拉起来。

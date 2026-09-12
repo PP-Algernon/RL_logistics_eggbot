@@ -6,6 +6,7 @@ from isaaclab.utils import configclass
 
 from eggtart_grasp.assets.eggtart import EGGTART_CFG
 from eggtart_grasp.tasks.mobile_grasp.mobile_grasp_env_cfg import (
+    BCCurriculumCfg,
     MobileGraspEnvCfg,
     MobileGraspEnvStaticCfg,
 )
@@ -20,16 +21,16 @@ class EggtartMobileGraspEnvCfg(MobileGraspEnvCfg):
         # attach the Eggtart robot to the scene
         self.scene.robot = EGGTART_CFG.replace(prim_path="{ENV_REGEX_NS}/Robot")
 
-
 @configclass
-class EggtartMobileGraspEnvStaticCfg(MobileGraspEnvStaticCfg):
-    """Training configuration for the Eggtart mobile-grasp task (static target)."""
+class EggtartMobileGraspEnvBCPPOCfg(MobileGraspEnvCfg):
+    """BC/PPO environment using shared Route B rewards and BCCurriculumCfg."""
+
+    curriculum: BCCurriculumCfg = BCCurriculumCfg()
 
     def __post_init__(self):
         super().__post_init__()
-        # attach the Eggtart robot to the scene
         self.scene.robot = EGGTART_CFG.replace(prim_path="{ENV_REGEX_NS}/Robot")
-
+        
 
 @configclass
 class EggtartMobileGraspEnvCfg_PLAY(EggtartMobileGraspEnvCfg):
@@ -42,26 +43,3 @@ class EggtartMobileGraspEnvCfg_PLAY(EggtartMobileGraspEnvCfg):
         self.scene.env_spacing = 3.0
         self.observations.policy.enable_corruption = False
 
-
-@configclass
-class EggtartMobileGraspEnvStaticBCPPOCfg(MobileGraspEnvStaticCfg):
-    """BC + PPO training configuration (Route B) with simplified rewards.
-
-    Key differences from standard configuration:
-    - Uses simplified reward configuration (only 5 core terms)
-    - No reward weight curriculum (all active from step 0)
-    - Designed for BC pretraining + PPO fine-tuning workflow
-    """
-
-    def __post_init__(self):
-        super().__post_init__()
-        # Attach the Eggtart robot
-        self.scene.robot = EGGTART_CFG.replace(prim_path="{ENV_REGEX_NS}/Robot")
-
-        # Replace with Route B simplified rewards
-        from eggtart_grasp.tasks.mobile_grasp.route_b_rewards import (
-            RouteBRewardsCfg,
-            RouteBCurriculumCfg,
-        )
-        self.rewards = RouteBRewardsCfg()
-        self.curriculum = RouteBCurriculumCfg()

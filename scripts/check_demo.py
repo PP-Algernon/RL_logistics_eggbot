@@ -3,7 +3,7 @@
 
 用法（远程，非 headless——isaaclab.sh 默认带窗口，可直接观看）:
     ./isaaclab.sh -p /home/pu/RL-ws/ProjectLearning/Eggtart-logistics-robot/scripts/check_demo.py \
-        --task Isaac-Mobile-Grasp-Eggtart-BCPPO-v0 \
+        --task Isaac-Mobile-Grasp-Eggtart-v0 \
         --data datasets/eggtart_demo.hdf5 \
         --episode 0
 
@@ -39,6 +39,8 @@ if _isaaclab_root:
 import h5py
 import numpy as np
 import torch
+
+from demo_dataset import canonical_demo_task
 
 # Isaac Lab/Omniverse extensions (for example ``omni.timeline``) are loaded
 # only after SimulationApp starts.  This replay script used to import the task
@@ -98,7 +100,7 @@ def main() -> None:
                 raise ValueError(f"{key} 的形状 {array.shape} 与轨迹数量/状态维度不匹配")
             if not np.isfinite(array).all():
                 raise ValueError(f"{key} 包含非有限数值")
-        recorded_task = f.attrs.get("env_name", "Isaac-Mobile-Grasp-Eggtart-BCPPO-v0")
+        recorded_task = f.attrs.get("env_name", "Isaac-Mobile-Grasp-Eggtart-v0")
         lift_height = float(f.attrs.get("lift_height", 0.15))
         has_obs = "obs" in f
 
@@ -106,7 +108,7 @@ def main() -> None:
         raise ValueError(f"action 应为有限值的 [N, {_ACTION_DIM}] 数组，实际形状为 {act.shape}")
     if ep_lens.ndim != 1 or not np.issubdtype(ep_lens.dtype, np.integer) or (ep_lens <= 0).any() or ep_lens.sum() != len(act):
         raise ValueError("episode_lengths 必须为正整数，其总和必须等于 action 样本数")
-    args_cli.task = args_cli.task or recorded_task
+    args_cli.task = args_cli.task or canonical_demo_task(recorded_task)
     if args_cli.task != recorded_task:
         print(f"[提示] 录制任务是 {recorded_task}，本次使用 {args_cli.task}；物理配置需要保持一致。")
     print(f"数据: {args_cli.data}  成功轨迹: {len(ep_lens)} 条  样本: {len(act):,}")
@@ -129,20 +131,14 @@ def _replay(args_cli, simulation_app, act, ep_lens, ep_indices, init_states, lif
     init_rp, init_rq, init_jp, init_tp, init_tq = init_states
 
     # ---------- 建环境（与采集同配置） ----------
-    from eggtart_grasp.tasks.mobile_grasp.config.eggtart import grasp_env_cfg
+    import eggtart_grasp.tasks  # noqa: F401 -- register the task after AppLauncher
+    from isaaclab_tasks.utils import parse_env_cfg
 
-    _ENV_CFG_MAP = {
-        "Isaac-Mobile-Grasp-Eggtart-v0": grasp_env_cfg.EggtartMobileGraspEnvCfg,
-        "Isaac-Mobile-Grasp-Eggtart-Static-v0": grasp_env_cfg.EggtartMobileGraspEnvStaticCfg,
-        "Isaac-Mobile-Grasp-Eggtart-Play-v0": grasp_env_cfg.EggtartMobileGraspEnvCfg_PLAY,
-        "Isaac-Mobile-Grasp-Eggtart-BCPPO-v0": grasp_env_cfg.EggtartMobileGraspEnvStaticBCPPOCfg,
-    }
-    if args_cli.task not in _ENV_CFG_MAP:
-        raise ValueError(f"Unknown task: {args_cli.task}. Available: {list(_ENV_CFG_MAP)}")
-    env_cfg = _ENV_CFG_MAP[args_cli.task]()
+    env_cfg = parse_env_cfg(args_cli.task, device=args_cli.device)
     env_cfg.scene.num_envs = 1
     env_cfg.sim.device = args_cli.device
     env_cfg.events.target_approach_stage1 = None
+    env_cfg.events.randomize_target_velocity = None
     env_cfg.events.randomize_target_velocity = None
 
     import gymnasium as gym

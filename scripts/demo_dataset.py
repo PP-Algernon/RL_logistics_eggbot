@@ -9,6 +9,15 @@ import numpy as np
 import torch
 
 
+def canonical_demo_task(task):
+    """Read legacy dataset labels without registering extra environment variants."""
+    if task == "Isaac-Mobile-Grasp-Eggtart-Static-v0":
+        return "Isaac-Mobile-Grasp-Eggtart-BCPPO-v0"
+    if task == "Isaac-Mobile-Grasp-Eggtart-Play-v0":
+        return "Isaac-Mobile-Grasp-Eggtart-v0"
+    return task
+
+
 def load_dataset(filepath, device="cpu", train_split=0.9, seed=42, *, split_metadata=None,
                  expected_env=None):
     """Reuse a saved split only after verifying dataset identity and episode coverage."""
@@ -22,8 +31,10 @@ def load_dataset(filepath, device="cpu", train_split=0.9, seed=42, *, split_meta
         if not f.attrs.get("successful_only", False):
             raise ValueError("Use a dataset marked successful_only=True")
         env_name = str(f.attrs.get("env_name", ""))
-    if expected_env and env_name and env_name != expected_env:
+    if expected_env and env_name and canonical_demo_task(env_name) != expected_env:
         raise ValueError(f"Dataset task {env_name} does not match {expected_env}")
+    if expected_env and env_name and env_name != expected_env:
+        print(f"Dataset task label {env_name} maps to {expected_env}")
     if obs.ndim != 2 or actions.ndim != 2 or obs.shape[0] != actions.shape[0]:
         raise ValueError("obs/action must be 2D arrays with the same number of samples")
     if obs.shape[1:] != (44,) or actions.shape[1:] != (9,):

@@ -17,7 +17,7 @@ parser.add_argument(
     "--disable_fabric", action="store_true", default=False, help="Disable fabric and use USD I/O operations."
 )
 parser.add_argument("--num_envs", type=int, default=None, help="Number of environments to simulate.")
-parser.add_argument("--task", type=str, default=None, help="Name of the task.")
+parser.add_argument("--task", type=str, default="Isaac-Mobile-Grasp-Eggtart-v0", help="Name of the task.")
 # --- 脚本化抓取接管（演示用）---
 parser.add_argument(
     "--scripted_grasp",
@@ -102,6 +102,9 @@ def main():
     resume_path = cli_args.resolve_checkpoint(log_root_path, agent_cfg.load_run, agent_cfg.load_checkpoint)
     log_dir = os.path.dirname(resume_path)
 
+    # Evaluation uses the same config with observation noise disabled.
+    env_cfg.observations.policy.enable_corruption = False
+
     # create isaac environment
     env = gym.make(args_cli.task, cfg=env_cfg, render_mode="rgb_array" if args_cli.video else None)
 
@@ -110,8 +113,7 @@ def main():
         stage = args_cli.curriculum_stage
         print(f"[INFO] 手动设置逆课程学习阶段: {stage}")
 
-        # Use the same thresholds as reset_target; old hard-coded values selected
-        # the wrong stage after curriculum thresholds changed.
+        # Both reward curricula share the target curriculum configured in EventCfg.
         target_params = env_cfg.events.reset_target.params
         _locked_step = {
             1: 0,

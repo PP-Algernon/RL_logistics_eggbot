@@ -1,19 +1,18 @@
 # eggtart_grasp
 
-Isaac Lab external extension for the Eggtart mobile manipulator: a 4-wheel omnidirectional base
-+ 5-axis arm + force-controlled gripper learning to navigate to a cube on the ground, grasp it,
-and lift it.
+Isaac Lab extension for the Eggtart mobile manipulator: an omnidirectional base,
+5-axis arm and force-controlled gripper grasping a ground target.
 
-Install (from the Isaac Lab root):
+Install from the Isaac Lab root:
 
 ```bash
-./isaaclab.sh -p -m pip install -e <path>/Eggtart-logistics-robot/source/eggtart_grasp
+./isaaclab.sh -p -m pip install -e <project>/source/eggtart_grasp
 ```
 
-Registered tasks:
+The only registered task is `Isaac-Mobile-Grasp-Eggtart-v0`. It uses
+`eggtart_grasp/tasks/mobile_grasp/mobile_grasp_env_cfg.py:MobileGraspEnvCfg`
+for Route B rewards and the reverse target curriculum, shared by collection,
+PPO/DAPG training and policy playback.
 
-- `Isaac-Mobile-Grasp-Eggtart-v0` — training (target gets a small random initial velocity)
-- `Isaac-Mobile-Grasp-Eggtart-Static-v0` — training with a fully static target (easier)
-- `Isaac-Mobile-Grasp-Eggtart-Play-v0` — visualisation / evaluation
-
-See the project root `README.md` for full usage.
+See the project [README](../../README.md) and
+[training checklist](../../.doc/TODO_BC_PPO_DAPG.md) for commands and migration notes.

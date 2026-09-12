@@ -1,21 +1,37 @@
 # Eggtart 移动抓取：BC → PPO → DAPG
 
-任务：`Isaac-Mobile-Grasp-Eggtart-BCPPO-v0`。更新：2026-09-11。
+任务：`Isaac-Mobile-Grasp-Eggtart-v0`。更新：2026-09-12。
+
+## 唯一配置入口（2026-09-12）
+
+环境统一为 `mobile_grasp_env_cfg.py:MobileGraspEnvCfg`，只注册上面的任务名。
+路线 B 奖励已并入 `RewardsCfg`，新的 `CurriculumCfg.target_difficulty` 保留逆向课程，
+按 96,000 / 144,000 环境步切换“辅助靠近 → 静止目标 → 随机位置的静止目标”。
+阶段阈值只在这里配置；不再使用旧的奖励权重调度。所有抓取奖励从第 0 步启用。
+
+`Static / Play` 公开入口已删除；`MobileGraspEnvStaticCfg`、`config/eggtart/grasp_env_cfg.py` 和 `route_b_rewards.py` 保留，供两种环境复用。
+`BCCurriculumCfg` 位于 `mobile_grasp_env_cfg.py`，路线 B 仅通过它切换奖励权重。PPO 网络和优化器参数仍在
+`config/eggtart/agents/rsl_rl_ppo_cfg.py`；机器人资产参数仍在 `assets/eggtart.py`。
+
+旧任务名不再接受作为 `--task`；已有 HDF5 内的旧任务标签会在读取时迁移，
+不修改原文件或数据指纹。旧模型权重可继续加载，但当前 reward 和课程以唯一配置为准。
 
 ## 当前检查结论
+
+当前数据量已更新；下表 BC 权重和 50 次续训成绩来自 9 月 11 日的旧版数据。
 
 BC 的数据、模型接口和 checkpoint 衔接已修正，已完成小规模运行验证。**正式 BC 预训练、策略抓取成功率评估和 1500 次更新的正式训练尚未完成。**
 
 | 项目 | 当前状态 |
 |---|---|
-| 成功演示 | 3,541 条完整轨迹，742,290 个样本，观测 44 维、动作 9 维 |
-| 采集成功率 | 57.63%；文件只保留成功轨迹，可以先用现有数据，不以提高教师成功率为前置任务 |
-| 数据划分 | 按整条轨迹划分；seed=42 时训练 3,186 条 / 667,920 帧，验证 355 条 / 74,370 帧 |
+| 成功演示 | 7,090 条完整轨迹，1,488,705 个样本（2026-09-12 当前文件），观测 44 维、动作 9 维 |
+| 采集成功率 | 54.79%；文件只保留成功轨迹，可以先用现有数据，不以提高教师成功率为前置任务 |
+| 数据划分 | 按整条轨迹划分；seed=42 时训练 6,381 条 / 1,339,532 帧，验证 709 条 / 149,173 帧 |
 | BC 输入与网络 | 原始观测；actor/critic `[256,128,64]`、ELU，与 PPO 一致 |
-| BC 试跑 | 2 epoch；验证 MSE 从 1.786904 降到 0.012915 |
+| BC 试跑 | 9 月 11 日旧版数据（3,541 条）的 2 epoch 验证 MSE 从 1.786904 降到 0.012915；当前扩大后的数据未重新做正式 BC |
 | 权重加载 | 真实 Isaac 环境中 BC → PPO、BC → DAPG 均完成 32 环境、2 次更新 |
 | DAPG 实现 | 可显式启用；演示 MSE、指数退火、保存恢复、独立记录参数已实现 |
-| 自动化回归 | 4 项通过：轨迹隔离/数据身份、无效数据、BC/PPO/DAPG 衔接、checkpoint 参数 |
+| 自动化回归 | 5 项通过：轨迹隔离/数据身份、无效数据、旧任务标签迁移、BC/PPO/DAPG 衔接、checkpoint 参数 |
 | DAPG 续训短跑 | 512 环境、50 次更新通过；恢复前已有 2 次更新，结束时计数为 52 |
 | BC 策略播放入口 | 2 环境、阶段 2、2 帧录制运行完成，JIT/ONNX 导出成功；只验证入口，不评估抓取 |
 
@@ -69,7 +85,7 @@ python $PROJECT/scripts/pretrain_bc.py \
 - [ ] 正式 checkpoint 和 metrics JSON 生成；`infos.bc_pretrain=True`，`obs_mean/obs_std=None`。
 - [ ] 确定性策略在仿真中独立完成抓取；低 MSE 本身不代表成功率达标。
 
-动作保留采集时的原始尺度。机械臂动作是绝对关节位置，出现小于 -1 的值是正常的，不能把整个动作向量裁剪到 `[-1,1]`。BC 训练 actor 的均值；critic 和动作标准差未经过 BC 学习，PPO 初始 `std=1.0` 会引入探索噪声。
+动作保留采集时的原始尺度。机械臂动作按 `target_q = action × 0.5 + default_q` 转成关节位置目标，出现小于 -1 的值是正常的，不能把整个动作向量裁剪到 `[-1,1]`。BC 训练 actor 的均值；critic 和动作标准差未经过 BC 学习，PPO 初始 `std=1.0` 会引入探索噪声。
 
 ## 阶段 2：PPO / DAPG 短跑
 
@@ -77,7 +93,7 @@ python $PROJECT/scripts/pretrain_bc.py \
 
 ```bash
 ./isaaclab.sh -p "$PROJECT/scripts/rsl_rl/train.py" \
-    --task Isaac-Mobile-Grasp-Eggtart-BCPPO-v0 \
+    --task Isaac-Mobile-Grasp-Eggtart-v0 \
     --num_envs 512 --max_iterations 50 --headless \
     --resume --checkpoint checkpoints/bc_pretrained.pt \
     --run_name bc_ppo_check
@@ -89,7 +105,7 @@ python $PROJECT/scripts/pretrain_bc.py \
 
 ```bash
 ./isaaclab.sh -p "$PROJECT/scripts/rsl_rl/train.py" \
-    --task Isaac-Mobile-Grasp-Eggtart-BCPPO-v0 \
+    --task Isaac-Mobile-Grasp-Eggtart-v0 \
     --num_envs 512 --max_iterations 50 --headless \
     --resume --checkpoint checkpoints/bc_pretrained.pt \
     --demo_data datasets/eggtart_demo.hdf5 \
@@ -121,14 +137,14 @@ python $PROJECT/scripts/pretrain_bc.py \
 
 现有数据可以用于 BC，但采集与训练环境不是完全相同的分布：
 
-| 条件 | 采集教师 | 当前 BCPPO 环境 |
+| 条件 | 采集教师 | 当前统一环境 |
 |---|---|---|
 | 目标靠近辅助 | 关闭 | 阶段 1 仍开启，接近速度 0.05 m/s |
 | 初始目标位置 | 沿 link_001 前方 0.5 m，世界 z=0.10 m，随后落地 | 阶段 1 按机器人根坐标系 x=0.6–0.7 m、y=±0.05 m、z=0.015–0.020 m 采样 |
 | 成功口径 | 相对闭爪前抬升 0.15 m，收回后连续保持 0.5 s | 奖励采用目标质心高度 0.12 m、保持 0.1 s |
 | 课程 | 教师固定采集流程 | 目标分布阶段 2/3 在 4000/6000 iteration 对应步数切换 |
 
-BCPPO 没有奖励权重课程，奖励从第 0 步全部启用。训练 1500 次更新仍处于目标分布阶段 1。不能据此宣称已经覆盖所有课程阶段。
+统一环境的 CurriculumCfg 只管理目标难度，奖励从第 0 步全部启用。训练 1500 次更新仍处于目标分布阶段 1。不能据此宣称已经覆盖所有课程阶段。
 
 后续评估应先在与演示一致的初始状态、静止目标条件下检查 BC，再评估目标位置变化后的泛化。统计学习策略成功率时不要启用 `--scripted_grasp`，也不要把 episode reward 当作成功率。教师约 60% 的采集成功率与学习策略的实际成功率是不同指标。
 
@@ -140,7 +156,7 @@ BCPPO 没有奖励权重课程，奖励从第 0 步全部启用。训练 1500 �
 
 ```bash
 ./isaaclab.sh -p "$PROJECT/scripts/rsl_rl/train.py" \
-    --task Isaac-Mobile-Grasp-Eggtart-BCPPO-v0 \
+    --task Isaac-Mobile-Grasp-Eggtart-v0 \
     --num_envs 2048 --max_iterations 1500 --headles \
     --resume --checkpoint checkpoints/bc_pretrained.pt \
     --demo_data datasets/eggtart_demo.hdf5 \
@@ -148,7 +164,7 @@ BCPPO 没有奖励权重课程，奖励从第 0 步全部启用。训练 1500 �
     --run_name bc_dapg
 ```
 
-当前真正注册的 PPO 参数为 lr=1e-3 adaptive、entropy=0.005、每次 24 步、5 epoch、4 minibatch。`route_b_rewards.py` 中另有一个 lr=3e-4 的配置类，但没有接入当前 runner，不要误以为已经启用。
+当前真正注册的 PPO 参数为 lr=1e-3 adaptive、entropy=0.005、每次 24 步、5 epoch、4 minibatch。未接入的 lr=3e-4 配置类已删除，调参只修改实际 runner 配置。
 
 观察 value/surrogate/entropy、演示 MSE、系数，以及单独统计的抓取成功率。系数约在第 90 次更新达到 0.001 下限。
 
@@ -156,7 +172,7 @@ BCPPO 没有奖励权重课程，奖励从第 0 步全部启用。训练 1500 �
 
 ```bash
 ./isaaclab.sh -p "$PROJECT/scripts/rsl_rl/play.py" \
-    --task Isaac-Mobile-Grasp-Eggtart-BCPPO-v0 \
+    --task Isaac-Mobile-Grasp-Eggtart-v0 \
     --num_envs 16 --checkpoint checkpoints/bc_pretrained.pt
 ```
 
@@ -166,7 +182,7 @@ BCPPO 没有奖励权重课程，奖励从第 0 步全部启用。训练 1500 �
 
 ## 本次运行记录
 
-以下均为临时验证产物，不是正式模型：
+以下 2026-09-11 记录来自合并前的 BCPPO 配置，均为临时验证产物，不是正式模型：
 
 - BC：`/tmp/bc_pipeline_smoke.pt`、`/tmp/bc_pipeline_smoke.pt.metrics.json`、`/tmp/bc_pipeline_smoke.log`。
 - 回归测试：`/tmp/bc_ppo_tests.log`。
@@ -186,6 +202,15 @@ PYTHONPATH=/home/pu/miniconda3/envs/my_isaac_env/lib/python3.11/site-packages \
 ```
 
 `init_*` 用于还原演示初始场景；BC 监督训练主要依赖正确对应的 obs/action 和轨迹边界。缺少 init 状态不意味着数据一定不能训练，但会限制物理回放。本次文件含有 init 状态，无需因之前回放显示问题重新采集。
+
+2026-09-12 统一配置验证记录：
+
+- `/tmp/eggtart_unified_env.log`：真实环境检查阶段边界、位置采样、零初速、44/9 维接口和七项奖励。
+- `/tmp/eggtart_unified_bc_tests.log`：旧数据标签迁移与 BC/PPO/DAPG 回归。
+- `/tmp/eggtart_unified_train.log`：唯一任务加载旧演示的 DAPG 两次更新。
+- `/tmp/eggtart_unified_replay.log`：读取旧任务标签并回放 episode 0，目标最终高度 0.216 m，相对位置最大偏差显示为 0。
+- `/tmp/eggtart_unified_collect.log`：16 环境、350 步小批采集，成功 10/16，保存 2,124 个样本至临时文件。
+- `/tmp/eggtart_unified_play.log`：唯一任务的策略播放、阶段 3 选择与两帧视频/模型导出检查。
 
 ## 里程碑
 

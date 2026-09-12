@@ -22,7 +22,7 @@ parser.add_argument("--video", action="store_true", default=False, help="训练�
 parser.add_argument("--video_length", type=int, default=200, help="录制视频的长度（步数）")
 parser.add_argument("--video_interval", type=int, default=2000, help="视频录制间隔（步数）")
 parser.add_argument("--num_envs", type=int, default=None, help="要仿真的环境数量")
-parser.add_argument("--task", type=str, default=None, help="任务名称")
+parser.add_argument("--task", type=str, default="Isaac-Mobile-Grasp-Eggtart-v0", help="任务名称")
 parser.add_argument("--seed", type=int, default=None, help="环境使用的随机种子")
 parser.add_argument("--max_iterations", type=int, default=None, help="强化学习策略训练迭代次数")
 parser.add_argument("--demo_data", type=str, default=None, help="显式启用 DAPG，指定成功演示 HDF5；省略则为普通 PPO")

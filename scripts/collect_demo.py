@@ -18,7 +18,7 @@ from isaaclab.app import AppLauncher
 # Add argparse arguments
 parser = argparse.ArgumentParser(description="Collect demonstration data for BC pretraining")
 parser.add_argument("--num_envs", type=int, default=2048, help="Number of parallel environments")
-parser.add_argument("--task", type=str, default="Isaac-Mobile-Grasp-Eggtart-Static-v0", help="Environment name")
+parser.add_argument("--task", type=str, default="Isaac-Mobile-Grasp-Eggtart-BCPPO-v0", help="Environment name")
 parser.add_argument("--max_steps", type=int, default=2000, help="Maximum collection steps")
 parser.add_argument("--noise_scale", type=float, default=0.05, help="Action noise std")
 parser.add_argument("--output", type=str, default="datasets/eggtart_demo.hdf5", help="Output HDF5 file path")
@@ -340,7 +340,6 @@ class ScriptedTeacher:
             ee_cfg=self.ee_cfg,
             grasp_offset=tuple(self.grasp_offset.tolist()),
             direction_offset=tuple(self.direction_offset.tolist()),
-            stage1_end_step=2**62,  # 永不结束（演示收集时始终启用）
         )
 
     def _target_in_base_frame(self) -> torch.Tensor:
@@ -708,20 +707,14 @@ def main():
     print(f"{'='*80}\n")
 
     # Create environment
-    from eggtart_grasp.tasks.mobile_grasp.config.eggtart import grasp_env_cfg
+    import eggtart_grasp.tasks  # noqa: F401 -- register the task after AppLauncher
+    from isaaclab_tasks.utils import parse_env_cfg
 
-    _ENV_CFG_MAP = {
-        "Isaac-Mobile-Grasp-Eggtart-v0": grasp_env_cfg.EggtartMobileGraspEnvCfg,
-        "Isaac-Mobile-Grasp-Eggtart-Static-v0": grasp_env_cfg.EggtartMobileGraspEnvStaticCfg,
-        "Isaac-Mobile-Grasp-Eggtart-Play-v0": grasp_env_cfg.EggtartMobileGraspEnvCfg_PLAY,
-        "Isaac-Mobile-Grasp-Eggtart-BCPPO-v0": grasp_env_cfg.EggtartMobileGraspEnvStaticBCPPOCfg,
-    }
-    if args_cli.task not in _ENV_CFG_MAP:
-        raise ValueError(f"Unknown task: {args_cli.task}. Available: {list(_ENV_CFG_MAP)}")
-    env_cfg = _ENV_CFG_MAP[args_cli.task]()
+    env_cfg = parse_env_cfg(args_cli.task, device=args_cli.device)
     env_cfg.scene.num_envs = args_cli.num_envs
-    # Static 配置仍带有阶段 1 的目标跟随事件；仅关闭 teacher 跟随并不够。
+    # 教师采集/动作回放使用静止目标，关闭课程中的靠近辅助。
     env_cfg.events.target_approach_stage1 = None
+    env_cfg.events.randomize_target_velocity = None
     env_cfg.events.randomize_target_velocity = None
     env = gym.make(args_cli.task, cfg=env_cfg)
 

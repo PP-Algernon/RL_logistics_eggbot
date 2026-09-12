@@ -1,3 +1,5 @@
+> 历史记录：2026-09-12 配置合并后，本文的旧环境名、配置类和奖励调度不再适用。当前唯一环境为 `Isaac-Mobile-Grasp-Eggtart-v0`，请以[训练清单](TODO_BC_PPO_DAPG.md)为准。
+
 # RSL-RL 脚本使用手册
 
 本文档整理 `scripts/rsl_rl` 下三个脚本的实际用法：

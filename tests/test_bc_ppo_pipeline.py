@@ -100,6 +100,15 @@ class PipelineTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "NaN"):
             load_dataset(self.data)
 
+    def test_legacy_dataset_task_label(self):
+        with h5py.File(self.data, "r+") as f:
+            f.attrs["env_name"] = "Isaac-Mobile-Grasp-Eggtart-BCPPO-v0"
+        original = load_dataset(self.data)
+        migrated = load_dataset(self.data, expected_env="Isaac-Mobile-Grasp-Eggtart-BCPPO-v0",
+                                split_metadata=original[-1])
+        self.assertEqual(migrated[-1], original[-1])
+        torch.testing.assert_close(migrated[0], original[0])
+
     def test_bc_checkpoint_and_ppo_dapg_resume(self):
         obs, actions, val, val_actions, metadata = load_dataset(self.data)
         trainer = BCTrainer(44, 9, device="cpu")

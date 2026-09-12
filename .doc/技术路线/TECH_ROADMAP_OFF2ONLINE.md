@@ -1,3 +1,5 @@
+> 历史记录：2026-09-12 配置合并后，本文的旧环境名、配置类和奖励调度不再适用。当前唯一环境为 `Isaac-Mobile-Grasp-Eggtart-v0`，请以[训练清单](../TODO_BC_PPO_DAPG.md)为准。
+
 # Eggtart 移动抓取：从"纯 RL + 稠密奖励"转向"离线数据 + 稀疏奖励 RL"技术路线
 
 > 依据 arXiv:2608.12063（SMPC 演示 + 稀疏 offline-to-online RL，Spot/G1 实物验证）

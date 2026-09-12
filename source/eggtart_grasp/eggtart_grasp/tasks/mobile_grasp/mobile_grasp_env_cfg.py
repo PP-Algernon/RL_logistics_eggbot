@@ -41,36 +41,21 @@ from eggtart_grasp.assets.eggtart import (
 # Tunable task constants
 # ---------------------------------------------------------------------------
 # 抓取成功判定：目标物体被提起到的高度阈值
-# 目标初始生成高度在地面附近(0.015-0.020 m)，降低门槛让策略更容易获得正反馈
-# 从地面（0.015m）提升 10cm（到 0.115m）就算成功，鼓励探索
 LIFT_HEIGHT_THRESHOLD = 0.12  # m (目标质心高度，降低到 12cm)
 
 # 提起后必须保持在高度阈值以上这么久才算稳定抓取
-# 降低到 0.1s（约 3 步），避免"碰一下就掉"但不要求太久
 LIFT_DWELL_TIME = 0.1  # s
 
 # 目标移动速度范围（用于随机初始速度和周期性速度变化）
 TARGET_VELOCITY_RANGE = 0.10  # m/s (±range，降低到原来的40%)
 
 # 抓取点落在这个距离内算"到达目标"
-# 调整建议：如果EE一直到不了，可以放宽到0.08甚至0.10；等学会了再收紧
 GRASP_REACH_THRESHOLD = 0.1      # m (放宽让policy更容易触发grasp)
 
 # 夹爪关节低于此角度算"闭合"
-#
-# **改成力控后这个值必须跟着改**：位置控制时空夹能压到硬限位 -0.2，所以阈值 -0.15
-# 合理；但力控下夹住物体时夹爪**被物体挡住**，根本到不了 -0.2——
-# 实测 30 mm 立方体停在 q≈0.29，40 mm 停在 q≈0.40。
-# 如果还用 -0.15，"夹住了"这个条件永远不成立，grasp / retract 奖励恒为 0。
-#
-# 0.35 的依据：目标立方体 30 mm 停在 0.29，留一点余量；同时 0.35 对应开口约 44 mm，
-# 比物体宽——也就是"明显在往里夹但还没夹到"不会误判成已闭合。
-# 换目标尺寸要重算：开口-角度对应关系见 assets/eggtart.py 的注释表。
 GRIPPER_CLOSED_THRESHOLD = 0.35
 
 # 抓取点必须在 GRASP_REACH_THRESHOLD 内**连续停留**这么久，闭爪才算有效抓取
-# env.step_dt = (1/120) * 4 = 1/30 s，所以 0.3 s ≈ 9 步，0.6 s ≈ 18 步
-# 调整建议：如果grasp一直是0，先降到0.2让policy能拿到奖励，再逐步提高要求
 GRASP_DWELL_TIME = 0.2  # s (降低难度，让policy先学会基本动作)
 
 # 课程学习阶段划分：阶段1/2/3的起始步数
@@ -259,7 +244,6 @@ class EventCfg:
         },
     )
 
-    # 目标移动控制：全程静止（阶段1虽然有主动靠近，但初始速度为0）
     # 禁用随机移动，让模型专注于精准抓取
     randomize_target_velocity = EventTerm(
         func=mdp.randomize_target_velocity,
@@ -445,9 +429,8 @@ class RewardsCfg:
 
     # ========== 约束项（全程） ==========
     # 治 bang-bang 抖动：罚动作指令的跳变。
-    # 实测恒定动作下关节峰峰值仅 ~1e-6 rad，物理侧干净，抖动来自策略输出本身。
     # 臂+爪 6 维在 ±1 间来回跳时 action_rate_l2 ≈ 24，-0.02 让代价约 0.48，
-    # 与 ee_reach 靠近时的单步收益（~5.0 × 0.x）量级可比。
+
     action_rate = RewTerm(
         func=mdp.action_rate_l2, 
         weight=-0.02
@@ -457,8 +440,6 @@ class RewardsCfg:
         weight=-0.5,
         params={"asset_cfg": SceneEntityCfg("robot", joint_names=EGGTART_ARM_JOINT_NAMES)},
     )
-    
-    # 与 action_rate 互补：罚关节的实际速度（含夹爪，否则夹爪疯狂开合不受罚）。
     joint_vel = RewTerm(
         func=mdp.joint_vel_l2,
         weight=-0.005,
@@ -468,7 +449,6 @@ class RewardsCfg:
             )
         },
     )
-    # 底盘速度惩罚：带"到位 × 对准"门控，只在停好之后才罚速度（治绕圈退化）
     base_vel = RewTerm(
         func=mdp.base_velocity_l2,
         weight=-0.5,
@@ -524,19 +504,11 @@ class CurriculumCfg:
         params={"term_name": "ee_distance", "schedule": [(0, 0.0), (CURRICULUM_STAGE3_START_ITER*24, -0.6)]},
     )
 
-    # ========== 阶段 3: 近场精修 ==========
-    # 从 0 拉起是关键：本项只往总回报里**加**东西，不降低策略已有的收益。
-    # 换成"把 ee_reach 的 std 调小"来实现同样的近场收紧则会降低每个状态的分数，
-    # 上一次训练正是这样让策略放弃伸手、退回去刷底盘分（ee_reach 2.71 -> 0.29）。
-    # 与 gripper_closure / target_lift 同期（48000）打开：精准对齐本身没有意义，
-    # 它的价值在于让"对准之后闭爪"这件事能真的夹到东西。
+    # ========== 阶段 3: 抓取 ==========
     ee_precision_sched = CurrTerm(
         func=mdp.reward_weight_schedule,
         params={"term_name": "ee_precision", "schedule": [(0, 0.0), (CURRICULUM_STAGE3_START_ITER*24, 10.0)]},
     )
-
-    # ========== 阶段 3: 抓取 ==========
-    # 正向奖励：闭爪就给分
     gripper_closure_reward_sched = CurrTerm(
         func=mdp.reward_weight_schedule,
         params={"term_name": "gripper_closure_reward", "schedule": [(0, 0.0), (CURRICULUM_STAGE3_START_ITER*24, 15.0)]},
@@ -552,7 +524,6 @@ class CurriculumCfg:
             "schedule": [(0, 0.0), (96000, 0.3), (120000, 0.6), (144000, 1.0)],
         },
     )
-    # 提升奖励
     target_lift_progress_sched = CurrTerm(
         func=mdp.reward_weight_schedule,
         params={"term_name": "target_lift_progress", "schedule": [(0, 0.0), (CURRICULUM_STAGE3_START_ITER*24, 30.0)]},
@@ -580,7 +551,91 @@ class CurriculumCfg:
         func=mdp.reward_weight_schedule,
         params={"term_name": "base_vel", "schedule": [(0, -0.5), (CURRICULUM_STAGE4_START_ITER*24, -1.0)]},
     )
-    
+
+@configclass
+class BCCurriculumCfg:
+    """BC 预训练后的路线 B 奖励课程，与普通环境共用 RewardsCfg。
+
+    第 0 步即启用接近、姿态、举升、抓取和两项正则，不重新等待导航课程。
+    其余奖励保留定义，权重设为零；不继承普通课程，避免后期重新启用。
+    目标逆向课程仍由 EventCfg 按 ANTI_CURRICULUM_* 阈值独立控制。
+    """
+
+    base_approach_sched = CurrTerm(
+        func=mdp.reward_weight_schedule,
+        params={"term_name": "base_approach", "schedule": [(0, 1.0)]},
+    )
+
+    base_facing_sched = CurrTerm(
+        func=mdp.reward_weight_schedule,
+        params={"term_name": "base_facing", "schedule": [(0, 0.0)]},
+    )
+
+    arm_comfort_sched = CurrTerm(
+        func=mdp.reward_weight_schedule,
+        params={"term_name": "arm_comfort", "schedule": [(0, 0.0)]},
+    )
+
+    ee_reach_sched = CurrTerm(
+        func=mdp.reward_weight_schedule,
+        params={"term_name": "ee_reach", "schedule": [(0, 2.0)]},
+    )
+
+    ee_orientation_sched = CurrTerm(
+        func=mdp.reward_weight_schedule,
+        params={"term_name": "ee_orientation", "schedule": [(0, 0.0)]},
+    )
+
+    grasp_posture_guide_sched = CurrTerm(
+        func=mdp.reward_weight_schedule,
+        params={"term_name": "grasp_posture_guide", "schedule": [(0, 1.5)]},
+    )
+
+    ee_distance_sched = CurrTerm(
+        func=mdp.reward_weight_schedule,
+        params={"term_name": "ee_distance", "schedule": [(0, 0.0)]},
+    )
+
+    ee_precision_sched = CurrTerm(
+        func=mdp.reward_weight_schedule,
+        params={"term_name": "ee_precision", "schedule": [(0, 0.0)]},
+    )
+
+    gripper_closure_reward_sched = CurrTerm(
+        func=mdp.reward_weight_schedule,
+        params={"term_name": "gripper_closure_reward", "schedule": [(0, 0.0)]},
+    )
+
+    target_lift_progress_sched = CurrTerm(
+        func=mdp.reward_weight_schedule,
+        params={"term_name": "target_lift_progress", "schedule": [(0, 10.0)]},
+    )
+
+    grasp_sched = CurrTerm(
+        func=mdp.reward_weight_schedule,
+        params={"term_name": "grasp", "schedule": [(0, 30.0)]},
+    )
+
+    joint_limits_sched = CurrTerm(
+        func=mdp.reward_weight_schedule,
+        params={"term_name": "joint_limits", "schedule": [(0, -0.3)]},
+    )
+
+    joint_vel_sched = CurrTerm(
+        func=mdp.reward_weight_schedule,
+        params={"term_name": "joint_vel", "schedule": [(0, 0.0)]},
+    )
+
+    action_rate_sched = CurrTerm(
+        func=mdp.reward_weight_schedule,
+        params={"term_name": "action_rate", "schedule": [(0, -0.01)]},
+    )
+
+    base_vel_sched = CurrTerm(
+        func=mdp.reward_weight_schedule,
+        params={"term_name": "base_vel", "schedule": [(0, 0.0)]},
+    )
+
 
 @configclass
 class TerminationsCfg:
@@ -616,21 +671,3 @@ class MobileGraspEnvCfg(ManagerBasedRLEnvCfg):
         # 仿真设置
         self.sim.dt = 1.0 / 120.0
 
-
-@configclass
-class MobileGraspEnvStaticCfg(MobileGraspEnvCfg):
-    """Eggtart 移动抓取环境配置（静止目标版本）
-
-    继承基础配置，但禁用目标的随机移动：
-    - 初始速度设为 0
-    - 禁用周期性速度随机化（通过设置超长间隔）
-    """
-
-    def __post_init__(self):
-        super().__post_init__()
-
-        # 覆盖目标初始速度为 0（静止）
-        self.events.reset_target.params["velocity_range"] = {"x": (0.0, 0.0), "y": (0.0, 0.0)}
-
-        # 禁用周期性速度随机化：设置超长间隔（1小时），实际episode只有10秒
-        self.events.randomize_target_velocity.interval_range_s = (3600.0, 3600.0)

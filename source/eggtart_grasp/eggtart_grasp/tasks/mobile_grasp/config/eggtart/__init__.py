@@ -1,54 +1,20 @@
-"""Gym environment registrations for the Eggtart mobile-grasp task."""
+"""Register the standard PPO and BC/PPO Eggtart environments."""
 
 import gymnasium as gym
 
 from . import agents, grasp_env_cfg
 
-##
-# Register Gym environments.
-##
 
-# Moving target version (original)
-gym.register(
-    id="Isaac-Mobile-Grasp-Eggtart-v0",
-    entry_point="isaaclab.envs:ManagerBasedRLEnv",
-    disable_env_checker=True,
-    kwargs={
-        "env_cfg_entry_point": grasp_env_cfg.EggtartMobileGraspEnvCfg,
-        "rsl_rl_cfg_entry_point": f"{agents.__name__}.rsl_rl_ppo_cfg:EggtartMobileGraspPPORunnerCfg",
-    },
-)
+def _register(task_id, cfg):
+    gym.register(
+        id=task_id, entry_point="isaaclab.envs:ManagerBasedRLEnv",
+        disable_env_checker=True,
+        kwargs={
+            "env_cfg_entry_point": cfg,
+            "rsl_rl_cfg_entry_point": f"{agents.__name__}.rsl_rl_ppo_cfg:EggtartMobileGraspPPORunnerCfg",
+        },
+    )
 
-# Static target version (easier training)
-gym.register(
-    id="Isaac-Mobile-Grasp-Eggtart-Static-v0",
-    entry_point="isaaclab.envs:ManagerBasedRLEnv",
-    disable_env_checker=True,
-    kwargs={
-        "env_cfg_entry_point": grasp_env_cfg.EggtartMobileGraspEnvStaticCfg,
-        "rsl_rl_cfg_entry_point": f"{agents.__name__}.rsl_rl_ppo_cfg:EggtartMobileGraspPPORunnerCfg",
-    },
-)
 
-# Play/evaluation version
-gym.register(
-    id="Isaac-Mobile-Grasp-Eggtart-Play-v0",
-    entry_point="isaaclab.envs:ManagerBasedRLEnv",
-    disable_env_checker=True,
-    kwargs={
-        "env_cfg_entry_point": grasp_env_cfg.EggtartMobileGraspEnvCfg_PLAY,
-        "rsl_rl_cfg_entry_point": f"{agents.__name__}.rsl_rl_ppo_cfg:EggtartMobileGraspPPORunnerCfg",
-    },
-)
-
-# BC + PPO training version (Route B - simplified rewards)
-gym.register(
-    id="Isaac-Mobile-Grasp-Eggtart-BCPPO-v0",
-    entry_point="isaaclab.envs:ManagerBasedRLEnv",
-    disable_env_checker=True,
-    kwargs={
-        "env_cfg_entry_point": grasp_env_cfg.EggtartMobileGraspEnvStaticBCPPOCfg,
-        "rsl_rl_cfg_entry_point": f"{agents.__name__}.rsl_rl_ppo_cfg:EggtartMobileGraspPPORunnerCfg",
-    },
-)
-
+_register("Isaac-Mobile-Grasp-Eggtart-v0", "eggtart_grasp.tasks.mobile_grasp.config.eggtart.grasp_env_cfg:EggtartMobileGraspEnvCfg")
+_register("Isaac-Mobile-Grasp-Eggtart-BCPPO-v0", "eggtart_grasp.tasks.mobile_grasp.config.eggtart.grasp_env_cfg:EggtartMobileGraspEnvBCPPOCfg")
