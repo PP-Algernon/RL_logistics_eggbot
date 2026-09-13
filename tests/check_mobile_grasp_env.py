@@ -36,13 +36,15 @@ try:
     weights = {
         "base_approach": 1.0, "ee_reach": 2.0, "grasp_posture_guide": 1.5,
         "target_lift_progress": 10.0, "grasp": 30.0, "action_rate": -0.01, "joint_limits": -0.3,
+        "gripper_holding_object": 5.0,
+        "retract_bonus_lift": 5.0,
     }
     env = gym.make(args.task, cfg=cfg).unwrapped
     params = env.event_manager.get_term_cfg("reset_target").params
     second, third = params["stage2_start_step"], params["stage3_start_step"]
     robot, target = env.scene["robot"], env.scene["target"]
     link = params["reference_cfg"].body_ids[0]
-    assert len(env.reward_manager.active_terms) == 15
+    assert len(env.reward_manager.active_terms) == 17
     assert env.action_manager.total_action_dim == 9
     assert "interval" not in env.event_manager.available_modes
 

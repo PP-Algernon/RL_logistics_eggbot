@@ -56,7 +56,7 @@ BC 预训练、数据检查、恢复训练及验证步骤见
 
 ## 奖励和逆向课程
 
-`RewardsCfg` 保留原有奖励函数。BCPPO 的 `BCCurriculumCfg` 使以下七项奖励**从第 0 步全部启用**，其余项权重固定为零；普通环境保留原奖励调度：
+`RewardsCfg` 保留原有奖励函数。BCPPO 的 `BCCurriculumCfg` 使以下七项奖励**从第 0 步全部启用**，其余课程控制项权重固定为零；普通环境保留原奖励调度：
 
 | 项目 | 权重 |
 |---|---:|
@@ -67,6 +67,8 @@ BC 预训练、数据检查、恢复训练及验证步骤见
 | 稳定举升 `grasp` | 30.0 |
 | 动作变化 `action_rate` | -0.01 |
 | 关节限位 `joint_limits` | -0.3 |
+
+两种环境另有固定权重 `5.0` 的 `gripper_holding_object`，从第 0 步启用，不受课程调度影响。它要求夹爪关节角在 0.18–0.32 rad、力矩绝对值大于 0.1 Nm、目标距 `link_005` 的抓取点小于 0.07 m，满足时原始奖励为 1。Isaac Lab 按权重乘动作时间步累计，当前每步贡献约 `5 / 30 = 0.167`。
 
 两种环境的目标位置课程均由 `EventCfg.reset_target` 控制，阶段边界使用 `ANTI_CURRICULUM_*` 常量：
 
@@ -87,7 +89,8 @@ BC 预训练、数据检查、恢复训练及验证步骤见
 - 臂关节目标：`target_q = 0.5 * action + default_q`；不能把整个动作向量裁剪到 `[-1,1]`。
 - 底盘使用 `HolonomicBaseAction` 直接控制根速度；保留的麦轮逆运动学动作未启用。
 - 夹爪最大力矩 1.0 Nm；目标边长 0.032 m、质量 0.01 kg，摩擦 1.0 / 0.8。
-- 当前奖励成功判据：目标质心高度至少 0.12 m、距真实抓取点小于 0.12 m、线速度小于 1.2 m/s，连续保持 0.1 s。举升进度奖励也使用距离和速度门控；曾达到 0.12 m 后跌到 0.05 m 以下会终止回合。教师筛选仍使用相对举升 0.15 m、保持 0.5 s。
+- `grasp` 奖励要求目标质心高度至少 0.12 m、距抓取点小于 0.2 m、线速度小于 3.6 m/s，达标即给基础奖励 1。额外高度奖励从 0.12 到 0.14 m 线性递增至 1，在 0.14–0.16 m 内保持为 1，超过 0.16 m 后按 `exp(-(z - 0.16) / 0.02)` 衰减。因此 0.13 m 时总奖励为 1.5，区间内为 2，0.17 m 约 1.607，0.18 m 约 1.368；任一门控不满足则为 0。以上为乘权重和时间步之前的原始值；`lift_dwell_time` 当前不延迟奖励。教师筛选仍使用相对举升 0.15 m、保持 0.5 s。
+- 掉落终止 `target_dropped`：本回合目标质心曾达到 `LIFT_HEIGHT_THRESHOLD`（当前 0.12 m），之后降到 0.05 m 以下即判失败终止（`terminated`，非超时）。初始自然下落不触发；局部重置只清除对应环境的举升记录。
 - 物理时间步 1/120 s，动作间隔 4 步，episode 10 s。
 
 ## 验证
@@ -95,6 +98,10 @@ BC 预训练、数据检查、恢复训练及验证步骤见
 ```bash
 ./isaaclab.sh -p "$PROJECT/tests/check_mobile_grasp_env.py" --headless
 ./isaaclab.sh -p "$PROJECT/tests/check_mobile_grasp_env.py" --task Isaac-Mobile-Grasp-Eggtart-v0 --headless
+./isaaclab.sh -p "$PROJECT/tests/check_grasp_height_reward.py" --headless
+./isaaclab.sh -p "$PROJECT/tests/check_grasp_height_reward.py" --task Isaac-Mobile-Grasp-Eggtart-v0 --headless
+./isaaclab.sh -p "$PROJECT/tests/check_target_drop_termination.py" --headless
+./isaaclab.sh -p "$PROJECT/tests/check_target_drop_termination.py" --task Isaac-Mobile-Grasp-Eggtart-v0 --headless
 ```
 
 该检查分别创建两种真实环境，核对任务注册、44/9 维接口、三个阶段的位置/速度、课程边界、奖励权重和局部重置。BC/PPO/DAPG 的 CPU 回归测试命令见训练清单。

@@ -6,7 +6,7 @@ from .observations import *  # noqa: F401, F403
 from .actions import MecanumBaseAction, MecanumBaseActionCfg, HolonomicBaseAction, HolonomicBaseActionCfg, GripperForceAction, GripperForceActionCfg  # noqa: F401
 from .curriculums import reward_weight_schedule, reward_param_schedule  # noqa: F401
 from .target import randomize_target_velocity, target_approach_ee_direction, reset_target_curriculum  # noqa: F401
-from .terminations import base_tipped  # noqa: F401
+from .terminations import base_tipped, target_dropped  # noqa: F401
 
 # Explicitly export new reward functions to ensure they're available
 from .rewards import *  # noqa: F401, F403

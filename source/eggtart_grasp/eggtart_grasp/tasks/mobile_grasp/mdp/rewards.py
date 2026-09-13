@@ -929,11 +929,13 @@ def ee_lift_when_near(
 
 
 class GraspBonusLift(ManagerTermBase):
-    """目标在抓取点附近低速举升并连续保持时，给予稀疏抓取奖励。
+    """低速举升至最低高度给基础奖励，靠近目标高度区间再叠加奖励。
 
-    高度、三维距离和速度必须同时达标；任一条件失效即清零保持时间。
-    三维距离排除垂直脱手，速度门控排除仍在夹爪附近的高速甩动。
-    每个环境独立计时，episode 重置时清零。
+    高度、抓取点三维距离和速度必须同时达标，达标即给基础奖励 1。
+    额外奖励在最低高度到区间下界之间从 0 线性递增到 1，区间内为 1。
+    超过区间上界后按距离指数衰减，衰减尺度为区间下界与最低高度之差，
+    使抬得较高的目标向区间回落时也能持续获得更高奖励。
+    保持计时器只记录连续达标时间，不延迟奖励；重置时清零。
     """
 
     def __init__(self, cfg: RewardTermCfg, env: ManagerBasedRLEnv):
@@ -958,21 +960,33 @@ class GraspBonusLift(ManagerTermBase):
         grasp_offset: tuple[float, float, float] | None = None,
         hold_dist: float = 0.2,
         max_speed: float = 3.6,
+        lift_target_height_threshold1: float = 0.14,
+        lift_target_height_threshold2: float = 0.16,
     ) -> torch.Tensor:
         """
         Args:
             env: 环境实例
             lift_height_threshold: 目标质心必须达到的高度（米）
-            lift_dwell_time: 必须保持在高度阈值以上的时间（秒）
+            lift_dwell_time: 保留兼容现有配置；即时奖励不使用保持时间门槛。
             target_cfg: 目标物体实体配置
             ee_cfg: 抓取点参考连杆配置
             grasp_offset: 抓取点相对参考连杆的局部偏移
             hold_dist: 物块到抓取点的最大三维距离（米）
             max_speed: 目标最大线速度（米/秒）
+            lift_target_height_threshold1: 目标高度区间下界，须大于最低举升高度（米）
+            lift_target_height_threshold2: 目标高度区间上界，须不小于下界（米）
 
         Returns:
-            shape (num_envs,) 的奖励张量，0 或 1
+            shape (num_envs,) 的奖励张量，范围 [0, 2]；基础奖励和区间奖励各占 1。
         """
+        if not (
+            math.isfinite(lift_height_threshold)
+            and math.isfinite(lift_target_height_threshold1)
+            and math.isfinite(lift_target_height_threshold2)
+            and lift_height_threshold < lift_target_height_threshold1 <= lift_target_height_threshold2
+        ):
+            raise ValueError("举升高度须为有限值且满足 lift_height_threshold < 目标区间下界 <= 上界")
+
         target: RigidObject = env.scene[target_cfg.name]
 
         target_z = target.data.root_pos_w[:, 2]
@@ -986,9 +1000,11 @@ class GraspBonusLift(ManagerTermBase):
             lifted, self._lift_counter + dt, torch.zeros_like(self._lift_counter)
         )
 
-        success = lifted
-
-        return success.float()
+        shaping_width = lift_target_height_threshold1 - lift_height_threshold
+        approach = torch.clamp((target_z - lift_height_threshold) / shaping_width, min=0.0, max=1.0)
+        overshoot = torch.clamp(target_z - lift_target_height_threshold2, min=0.0)
+        height_bonus = approach * torch.exp(-overshoot / shaping_width)
+        return lifted.float() * (1.0 + height_bonus)
 
 
 # 导出名称供 cfg.py 使用
@@ -1241,7 +1257,7 @@ def target_lift_progress(
     env: ManagerBasedRLEnv,
     target_cfg: SceneEntityCfg = SceneEntityCfg("target"),
     gripper_cfg: SceneEntityCfg = SceneEntityCfg("robot", joint_names=["end_effector_joint"]),
-    target_height: float = 0.12,
+    target_height: float = 0.14,
     std: float = 0.05,
     gripper_closed_threshold: float = 0.35,
     gripper_open_pos: float = 1.0,  # 张开端；必须 > gripper_closed_threshold
@@ -1333,4 +1349,3 @@ def target_lift_progress(
 
     # 渐进式门控：夹爪闭合越多，奖励越大（提供密集梯度）
     return gripper_closure * reward
-

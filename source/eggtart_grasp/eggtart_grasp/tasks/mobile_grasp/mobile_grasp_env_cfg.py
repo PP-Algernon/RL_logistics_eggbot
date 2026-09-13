@@ -41,7 +41,10 @@ from eggtart_grasp.assets.eggtart import (
 # Tunable task constants
 # ---------------------------------------------------------------------------
 # 抓取成功判定：目标物体被提起到的高度阈值
-LIFT_HEIGHT_THRESHOLD = 0.12  # m (目标质心高度，降低到 12cm)
+LIFT_HEIGHT_THRESHOLD = 0.12
+
+LIFT_TARGET_HEIGHT_THRESHOLD1 = 0.14  # m，grasp 目标高度区间下界
+LIFT_TARGET_HEIGHT_THRESHOLD2 = 0.26  # m，grasp 目标高度区间上界
 
 # 提起后必须保持在高度阈值以上这么久才算稳定抓取
 LIFT_DWELL_TIME = 2.5  # s
@@ -330,6 +333,17 @@ class RewardsCfg:
     )
 
     # ========== 阶段 3: 抓取 ==========
+    # 持续夹持奖励，使用默认的位置、力矩和距离门槛。
+    gripper_holding_object = RewTerm(
+        func=mdp.gripper_holding_object,
+        params={
+            "gripper_cfg": SceneEntityCfg("robot", joint_names=[EGGTART_GRIPPER_JOINT_NAME]),
+            "target_cfg": SceneEntityCfg("target"),
+            "ee_cfg": SceneEntityCfg("robot", body_names="link_005"),
+            "grasp_offset": EGGTART_EE_GRASP_OFFSET,
+        },
+    )
+
     # 闭爪基础奖励（接近+闭爪就给，纯正向）
     # gate_blend 由 curriculum 控制：前期=0（抓空也给分，大胆闭），后期渐进到 1（必须夹住）
     gripper_closure_reward = RewTerm(
@@ -353,8 +367,8 @@ class RewardsCfg:
     target_lift_progress = RewTerm(
         func=mdp.target_lift_progress,
         params={
-            "target_height": LIFT_HEIGHT_THRESHOLD,
-            "std": 0.05,
+            "target_height": LIFT_TARGET_HEIGHT_THRESHOLD1,
+            "std": 0.07,
             "target_cfg": SceneEntityCfg("target"),
             "ee_cfg": SceneEntityCfg("robot", body_names="link_005"),
             "grasp_offset": EGGTART_EE_GRASP_OFFSET,
@@ -365,17 +379,30 @@ class RewardsCfg:
             "gripper_open_pos": EGGTART_GRIPPER_OPEN,
         },
     )
-    # 稀疏抓取奖励
+    # 最低举升高度给基础奖励，靠近目标高度区间叠加奖励。
     grasp = RewTerm(
         func=mdp.grasp_bonus_lift,
         params={
             "lift_height_threshold": LIFT_HEIGHT_THRESHOLD,
+            "lift_target_height_threshold1": LIFT_TARGET_HEIGHT_THRESHOLD1,
+            "lift_target_height_threshold2": LIFT_TARGET_HEIGHT_THRESHOLD2,
             "lift_dwell_time": LIFT_DWELL_TIME,
             "target_cfg": SceneEntityCfg("target"),
             "ee_cfg": SceneEntityCfg("robot", body_names="link_005"),
             "grasp_offset": EGGTART_EE_GRASP_OFFSET,
             "hold_dist": 0.2,
             "max_speed": 3.6,
+        },
+    )
+
+    # 目标提起后，鼓励五个臂关节回到默认姿态。
+    retract_bonus_lift = RewTerm(
+        func=mdp.retract_bonus_lift,
+        params={
+            "lift_height_threshold": LIFT_HEIGHT_THRESHOLD,
+            "std": 2.5,
+            "arm_cfg": SceneEntityCfg("robot", joint_names=EGGTART_ARM_JOINT_NAMES),
+            "target_cfg": SceneEntityCfg("target"),
         },
     )
 
@@ -452,6 +479,10 @@ class CurriculumCfg:
     )
 
     # ========== 阶段 3: 抓取 ==========
+    gripper_holding_object_sched = CurrTerm(
+        func=mdp.reward_weight_schedule,
+        params={"term_name": "gripper_holding_object", "schedule": [(0, 5.0)]},
+    )
     ee_precision_sched = CurrTerm(
         func=mdp.reward_weight_schedule,
         params={"term_name": "ee_precision", "schedule": [(0, 0.0), (CURRICULUM_STAGE3_START_ITER*24, 10.0)]},
@@ -479,6 +510,10 @@ class CurriculumCfg:
     grasp_sched = CurrTerm(
         func=mdp.reward_weight_schedule,
         params={"term_name": "grasp", "schedule": [(0, 0.0), (CURRICULUM_STAGE3_START_ITER*24, 30.0)]},
+    )
+    retract_bonus_lift_sched = CurrTerm(
+        func=mdp.reward_weight_schedule,
+        params={"term_name": "retract_bonus_lift", "schedule": [(0, 0.0), (CURRICULUM_STAGE3_START_ITER*24, 5.0)]},
     )
 
     # ========== 约束项 ==========
@@ -519,7 +554,7 @@ class BCCurriculumCfg:
     )
     grasp_posture_guide_sched = CurrTerm(
             func=mdp.reward_weight_schedule,
-            params={"term_name": "grasp_posture_guide", "schedule": [(0, 1.5)]},
+            params={"term_name": "grasp_posture_guide", "schedule": [(0, 1.0)]},
     )
 
     ee_reach_sched = CurrTerm(
@@ -546,31 +581,36 @@ class BCCurriculumCfg:
 
     target_lift_progress_sched = CurrTerm(
         func=mdp.reward_weight_schedule,
-        params={"term_name": "target_lift_progress", "schedule": [(0, 20.0)]},
+        params={"term_name": "target_lift_progress", "schedule": [(0, 10.0)]},
+    )
+    gripper_holding_object_sched = CurrTerm(
+            func=mdp.reward_weight_schedule,
+            params={"term_name": "gripper_holding_object", "schedule": [(0, 0.0)]},
     )
     grasp_sched = CurrTerm(
         func=mdp.reward_weight_schedule,
         params={"term_name": "grasp", "schedule": [(0, 30.0)]},
+    )
+    retract_bonus_lift_sched = CurrTerm(
+        func=mdp.reward_weight_schedule,
+        params={"term_name": "retract_bonus_lift", "schedule": [(0, 35.0)]},
     )
 
     joint_limits_sched = CurrTerm(
         func=mdp.reward_weight_schedule,
         params={"term_name": "joint_limits", "schedule": [(0, -0.3)]},
     )
-
     joint_vel_sched = CurrTerm(
         func=mdp.reward_weight_schedule,
-        params={"term_name": "joint_vel", "schedule": [(0, -0.01)]},
+        params={"term_name": "joint_vel", "schedule": [(0, -0.015)]},
     )
-
     action_rate_sched = CurrTerm(
         func=mdp.reward_weight_schedule,
         params={"term_name": "action_rate", "schedule": [(0, -0.01)]},
     )
-
     base_vel_sched = CurrTerm(
         func=mdp.reward_weight_schedule,
-        params={"term_name": "base_vel", "schedule": [(0, -0.01)]},
+        params={"term_name": "base_vel", "schedule": [(0, -0.025)]},
     )
 
 
@@ -580,6 +620,15 @@ class TerminationsCfg:
 
     time_out = DoneTerm(func=mdp.time_out, time_out=True)
     base_tipped = DoneTerm(func=mdp.base_tipped, params={"min_up_proj": 0.5})
+    target_dropped = DoneTerm(
+        func=mdp.target_dropped,
+        time_out=False,
+        params={
+            "lift_height_threshold": LIFT_HEIGHT_THRESHOLD,
+            "drop_height_threshold": 0.05,
+            "target_cfg": SceneEntityCfg("target"),
+        },
+    )
 
 
 ##
