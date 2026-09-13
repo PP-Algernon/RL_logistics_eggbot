@@ -27,7 +27,7 @@ class EggtartMobileGraspPPORunnerCfg(RslRlOnPolicyRunnerCfg):
         entropy_coef=0.005,
         num_learning_epochs=5,
         num_mini_batches=4,
-        learning_rate=1.0e-3,
+        learning_rate=7.0e-5,
         schedule="adaptive",
         gamma=0.99,
         lam=0.95,

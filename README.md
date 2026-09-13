@@ -16,6 +16,7 @@
 | `scripts/demo_dataset.py` | 数据校验、旧数据标签迁移、轨迹划分 |
 | `scripts/rsl_rl/train.py` | PPO；显式提供 `--demo_data` 时启用 DAPG |
 | `scripts/rsl_rl/play.py` | 确定性策略播放，关闭观测噪声并导出 JIT/ONNX |
+| `scripts/rsl_rl/evaluate.py` | 自动评估完整回合的连续举升成功率，保存 JSON 结果 |
 | `source/eggtart_grasp/eggtart_grasp/assets/eggtart.py` | 机器人资产、关节名称与几何常量 |
 | `source/eggtart_grasp/eggtart_grasp/tasks/mobile_grasp/mdp/` | 动作、观测、奖励、目标事件和课程的实现函数 |
 | `source/eggtart_grasp/eggtart_grasp/tasks/mobile_grasp/config/eggtart/` | 两种任务注册与 PPO 网络/优化器配置 |
@@ -54,6 +55,24 @@ BC 预训练、数据检查、恢复训练及验证步骤见
 ```
 
 旧的 `Static-v0`、`Play-v0` 环境入口已删除。读取旧 HDF5 时，Static 标签映射到 BCPPO，Play 标签映射到普通环境，BCPPO 标签保持原样；不修改原文件、数据指纹或验证集划分。checkpoint 的模型权重仍可加载；旧环境配置 pickle 不再作为当前配置入口。
+
+## 自动评估成功率
+
+```bash
+./isaaclab.sh -p "$PROJECT/scripts/rsl_rl/evaluate.py" \
+    --task Isaac-Mobile-Grasp-Eggtart-BCPPO-v0 \
+    --checkpoint checkpoints/bc_pretrained.pt \
+    --num_envs 64 --num_episodes 1000 --curriculum_stage 2 \
+    --seed 42 --headless --output evaluation/bc_success.json
+```
+
+`--checkpoint` 可替换为 PPO/DAPG 的 `model_*.pt` 路径。默认执行确定性策略、关闭观测噪声和物块追踪辅助，初始分布固定在第二阶段；`--curriculum_stage 3` 评估随机初始位置。可通过 `--stochastic` 使用 checkpoint 保存的动作噪声，或 `--observation_noise` 加入训练观测噪声。
+
+成功口径为 `LiftSuccess`：物块质心世界高度连续达到 `LIFT_HEIGHT_THRESHOLD`（当前 0.10 m）满 `LIFT_SUCCESS_DWELL_TIME`（当前 3.0 s）。仅按高度计时，中途低于阈值清零；评估配置单独启用成功终止。可用 `--lift_height`、`--dwell_time` 和 `--episode_length_s` 调整，保持时间必须大于 `LIFT_DWELL_TIME`（2.5 s）。默认时限读取当前任务配置；若抓取完成太晚，将计为超时，可显式延长时限。
+
+脚本为每个并行环境分配固定回合数，第一回合从零计时，恰好统计 `--num_episodes` 个完整回合。成功与超时同一步触发时计成功，掉落或翻倒与成功同时触发时计失败。它读取终止当步的标志，不读取自动重置后的物块高度。JSON 包含成功率（0–1）、各终止原因次数、逐回合结果和评估参数，旁边的 `.env.yaml` 保存实际环境配置；省略 `--output` 时保存在 checkpoint 同级 `evaluation/`。中断时保存已完成回合并标记 `complete=false`。
+
+评估使用当前任务环境配置，参数不会自动恢复为 checkpoint 训练时的旧环境配置。比较模型时请保持阶段、时限、成功阈值、动作模式、环境数量和种子一致。
 
 ## 奖励和逆向课程
 
@@ -99,9 +118,13 @@ PPO checkpoint 保存环境步数，续训时恢复课程进度；旧 checkpoint
 - 抓取后底盘减速奖励 `base_slow_after_grasp`：目标高度至少 0.12 m、距抓取点小于 0.2 m、目标速度小于 3.6 m/s 时，按 `1 / (1 + ||v_xy||² / 0.15² + wz² / 0.3²)` 奖励底盘低速和停稳。使用实际根节点速度，原始值最高 1；未抓起或脱手时为 0。权重 5.0，普通 PPO 在抓取阶段启用，BCPPO 从第 0 步启用。
 - 物理时间步 1/120 s，动作间隔 4 步，episode 10 s。
 
+成功终止 `lift_success`：由评估脚本启用；物块质心连续达到 `LIFT_HEIGHT_THRESHOLD`（当前 0.10 m）满 `LIFT_SUCCESS_DWELL_TIME = LIFT_DWELL_TIME + 0.5`（当前 3.0 s）后，返回 `terminated=True` 并自动重置。低于高度阈值或开始新回合时清零计时，各环境独立；按动作步向上取整，保证至少保持指定时长。配置要求 `dwell_time > lift_dwell_time`，等于或小于 2.5 s 会报错。该条件仅判断高度；`Episode_Termination/lift_success` 记录成功终止统计，抓取奖励仍按自身距离和速度条件计算。
+
 ## 验证
 
 ```bash
+./isaaclab.sh -p "$PROJECT/tests/check_lift_success_termination.py" --headless
+./isaaclab.sh -p "$PROJECT/tests/check_lift_success_termination.py" --task Isaac-Mobile-Grasp-Eggtart-v0 --headless
 ./isaaclab.sh -p "$PROJECT/tests/check_mobile_grasp_env.py" --headless
 ./isaaclab.sh -p "$PROJECT/tests/check_mobile_grasp_env.py" --task Isaac-Mobile-Grasp-Eggtart-v0 --headless
 ./isaaclab.sh -p "$PROJECT/tests/check_grasp_height_reward.py" --headless

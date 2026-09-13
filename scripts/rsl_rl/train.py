@@ -175,7 +175,7 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
             # RSL-RL 3.1.2 的策略在 alg.policy，默认直接存 std；仅 log 模式存 log_std。
             # 只初始化 BC，普通 PPO 续训保留 checkpoint 中学到的噪声。
             policy = runner.alg.policy
-            initial_std = 0.05
+            initial_std = 0.07
             with torch.no_grad():
                 if policy.state_dependent_std:
                     raise ValueError("BC 噪声初始化要求 state_dependent_std=False")

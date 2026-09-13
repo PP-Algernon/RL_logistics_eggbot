@@ -41,13 +41,16 @@ from eggtart_grasp.assets.eggtart import (
 # Tunable task constants
 # ---------------------------------------------------------------------------
 # 抓取成功判定：目标物体被提起到的高度阈值
-LIFT_HEIGHT_THRESHOLD = 0.12
+LIFT_HEIGHT_THRESHOLD = 0.1
 
 LIFT_TARGET_HEIGHT_THRESHOLD1 = 0.14  # m，grasp 目标高度区间下界
 LIFT_TARGET_HEIGHT_THRESHOLD2 = 0.26  # m，grasp 目标高度区间上界
 
 # 提起后必须保持在高度阈值以上这么久才算稳定抓取
 LIFT_DWELL_TIME = 2.5  # s
+
+# 成功终止晚于举升奖励的保持时间，额外留出 0.5 s。
+LIFT_SUCCESS_DWELL_TIME = LIFT_DWELL_TIME + 0.5  # s
 
 # 采集教师和课程前两阶段共用：link_001 局部 -Y 为前方，X 为侧向。
 DEMO_TARGET_DISTANCE = 0.5  # m
@@ -586,7 +589,7 @@ class BCCurriculumCfg:
 
     base_approach_sched = CurrTerm(
         func=mdp.reward_weight_schedule,
-        params={"term_name": "base_approach", "schedule": [(0, 1.0)]},
+        params={"term_name": "base_approach", "schedule": [(0, 0.0)]},
     )
     base_facing_sched = CurrTerm(
         func=mdp.reward_weight_schedule,
@@ -602,31 +605,30 @@ class BCCurriculumCfg:
             params={"term_name": "grasp_posture_guide", "schedule": [(0, 0.0)]},
     )
 
-    ee_reach_sched = CurrTerm(
-        func=mdp.reward_weight_schedule,
-        params={"term_name": "ee_reach", "schedule": [(0, 2.0)]},
-    )
     ee_orientation_sched = CurrTerm(
         func=mdp.reward_weight_schedule,
         params={"term_name": "ee_orientation", "schedule": [(0, 0.0)]},
     )
+    ee_reach_sched = CurrTerm(
+        func=mdp.reward_weight_schedule,
+        params={"term_name": "ee_reach", "schedule": [(0, 2.0)]},
+    )
     ee_precision_sched = CurrTerm(
         func=mdp.reward_weight_schedule,
-        params={"term_name": "ee_precision", "schedule": [(0, 1.0)]},
+        params={"term_name": "ee_precision", "schedule": [(0, 3.0)]},
     )
     ee_distance_sched = CurrTerm(
         func=mdp.reward_weight_schedule,
         params={"term_name": "ee_distance", "schedule": [(0, 0.0)]},
     )
 
-    gripper_closure_reward_sched = CurrTerm(
-        func=mdp.reward_weight_schedule,
-        params={"term_name": "gripper_closure_reward", "schedule": [(0, 0.0)]},
-    )
-
     target_lift_progress_sched = CurrTerm(
         func=mdp.reward_weight_schedule,
-        params={"term_name": "target_lift_progress", "schedule": [(0, 10.0)]},
+        params={"term_name": "target_lift_progress", "schedule": [(0, 7.0)]},
+    )
+    gripper_closure_reward_sched = CurrTerm(
+        func=mdp.reward_weight_schedule,
+        params={"term_name": "gripper_closure_reward", "schedule": [(0, 7.0)]},
     )
     gripper_holding_object_sched = CurrTerm(
         func=mdp.reward_weight_schedule,
@@ -638,7 +640,7 @@ class BCCurriculumCfg:
     )
     retract_bonus_lift_sched = CurrTerm(
         func=mdp.reward_weight_schedule,
-        params={"term_name": "retract_bonus_lift", "schedule": [(0, 35.0)]},
+        params={"term_name": "retract_bonus_lift", "schedule": [(0, 45.0)]},
     )
     base_slow_after_grasp_sched = CurrTerm(
         func=mdp.reward_weight_schedule,
@@ -713,7 +715,7 @@ class MobileGraspEnvCfg(ManagerBasedRLEnvCfg):
 
         # 通用设置
         self.decimation = 4
-        self.episode_length_s = 8.0
+        self.episode_length_s = 5.5
         self.sim.render_interval = self.decimation
         self.viewer.eye = (4.0, 4.0, 3.0)
         # 仿真设置

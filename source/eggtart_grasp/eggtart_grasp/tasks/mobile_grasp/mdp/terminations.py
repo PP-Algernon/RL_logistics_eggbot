@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 from typing import TYPE_CHECKING
 
 import torch
@@ -30,6 +31,41 @@ def base_tipped(
     base_z_axis[:, 2] = 1.0
     base_z_world = quat_apply(robot.data.root_quat_w, base_z_axis)
     return base_z_world[:, 2] < min_up_proj
+
+
+class LiftSuccess(ManagerTermBase):
+    """物块质心连续达到举升高度 dwell_time 秒后成功终止，仅判断高度。"""
+
+    def __init__(self, cfg: TerminationTermCfg, env: ManagerBasedRLEnv):
+        super().__init__(cfg, env)
+        self._lift_steps = torch.zeros(env.num_envs, dtype=torch.long, device=env.device)
+
+    def reset(self, env_ids: torch.Tensor | slice | None = None):
+        if env_ids is None:
+            self._lift_steps.zero_()
+        else:
+            self._lift_steps[env_ids] = 0
+
+    def __call__(
+        self,
+        env: ManagerBasedRLEnv,
+        lift_height_threshold: float,
+        dwell_time: float,
+        lift_dwell_time: float,
+        target_cfg: SceneEntityCfg = SceneEntityCfg("target"),
+    ) -> torch.Tensor:
+        if not (math.isfinite(dwell_time) and math.isfinite(lift_dwell_time)
+                and 0.0 <= lift_dwell_time < dwell_time):
+            raise ValueError("LiftSuccess 要求有限保持时间，且 dwell_time > lift_dwell_time >= 0")
+        if not math.isfinite(lift_height_threshold):
+            raise ValueError("LiftSuccess 的 lift_height_threshold 必须为有限值")
+        target: RigidObject = env.scene[target_cfg.name]
+        lifted = target.data.root_pos_w[:, 2] >= lift_height_threshold
+        self._lift_steps = torch.where(lifted, self._lift_steps + 1, 0)
+        return self._lift_steps >= math.ceil(dwell_time / env.step_dt)
+
+
+lift_success = LiftSuccess
 
 
 class TargetDropped(ManagerTermBase):
