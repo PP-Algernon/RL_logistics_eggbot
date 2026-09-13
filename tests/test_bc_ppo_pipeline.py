@@ -165,6 +165,27 @@ class PipelineTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "external normalization"):
             runner.load(checkpoint)
 
+    def test_curriculum_clock_checkpoint(self):
+        trainer = BCTrainer(44, 9, device="cpu")
+        runner = make_runner(trainer.policy_cfg)
+        runner.env.common_step_counter = 96017
+        checkpoint = Path(self.temp.name) / "clock.pt"
+        runner.save(checkpoint)
+        resumed = make_runner(trainer.policy_cfg)
+        resumed.env.common_step_counter = 0
+        resumed.load(checkpoint)
+        self.assertEqual(resumed.loaded_env_step_counter, 96017)
+        # Loading weights alone must not override an explicit evaluation stage.
+        self.assertEqual(resumed.env.common_step_counter, 0)
+        saved = torch.load(checkpoint, weights_only=False)
+        del saved["env_step_counter"]
+        torch.save(saved, checkpoint)
+        resumed.load(checkpoint)
+        self.assertIsNone(resumed.loaded_env_step_counter)
+        trainer.save_checkpoint(checkpoint, 1, {"mse": 0.0}, {})
+        resumed.load(checkpoint)
+        self.assertEqual(resumed.loaded_env_step_counter, 0)
+
     def test_checkpoint_cli(self):
         parser = argparse.ArgumentParser()
         add_rsl_rl_args(parser)

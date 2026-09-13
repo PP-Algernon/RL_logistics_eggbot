@@ -43,6 +43,19 @@ from isaaclab.managers import CurriculumTermCfg, ManagerTermBase
 if TYPE_CHECKING:
     from isaaclab.envs import ManagerBasedRLEnv
 
+
+def target_tracking_curriculum(env: ManagerBasedRLEnv, env_ids: Sequence[int]) -> float:
+    """记录目标跟踪辅助强度；实际速度辅助在每个动作步的事件中应用。"""
+    from .target import target_tracking_strength
+
+    cfg = env.cfg.events.target_approach_stage1
+    if cfg is None or cfg.params["approach_speed"] == 0.0:
+        return 0.0
+    return target_tracking_strength(
+        env.common_step_counter, cfg.params["stage1_end_step"], cfg.params.get("stage1_start_step", 0)
+    )
+
+
 class reward_weight_schedule(ManagerTermBase):
     """按步数分段设置某个奖励项的权重
 

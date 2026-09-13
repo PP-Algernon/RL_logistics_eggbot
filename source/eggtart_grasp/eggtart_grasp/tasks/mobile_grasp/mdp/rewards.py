@@ -273,6 +273,43 @@ def base_velocity_l2(
 
     return vel_sq * arrived * aligned
 
+def base_slow_after_grasp(
+    env: ManagerBasedRLEnv,
+    lift_height_threshold: float,
+    lin_vel_scale: float = 0.15,
+    ang_vel_scale: float = 0.3,
+    hold_dist: float = 0.2,
+    max_target_speed: float = 3.6,
+    robot_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
+    target_cfg: SceneEntityCfg = SceneEntityCfg("target"),
+    ee_cfg: SceneEntityCfg = SceneEntityCfg("robot", body_names="end_effector"),
+    grasp_offset: tuple[float, float, float] | None = None,
+) -> torch.Tensor:
+    """抓起目标后，奖励底盘降低水平线速度和偏航角速度、持续停稳。
+
+    使用与 grasp 相同的高度、抓取点距离和目标速度门控，每步重新判断。
+    读取底盘根节点的实际速度；全向底盘直接控制根速度，不能用轮子转速。
+    原始奖励为 gate / (1 + ||v_xy||² / lin_vel_scale² + wz² / ang_vel_scale²)，
+    范围 [0, 1]，配正权重。各速度尺度分别以 m/s 和 rad/s 为单位，
+    单独一项达到其尺度时奖励为 0.5，停稳时为 1；竖直和翻滚速度不计入。
+    未抓起或脱手时为 0，不记录历史速度，避免反复加速再减速获利。
+    """
+    if not (math.isfinite(lin_vel_scale) and lin_vel_scale > 0.0
+            and math.isfinite(ang_vel_scale) and ang_vel_scale > 0.0):
+        raise ValueError("底盘减速奖励的 lin_vel_scale 和 ang_vel_scale 必须为有限正数")
+
+    robot: Articulation = env.scene[robot_cfg.name]
+    target: RigidObject = env.scene[target_cfg.name]
+    lifted = target.data.root_pos_w[:, 2] >= lift_height_threshold
+    held_near = _ee_to_target_distance(env, ee_cfg, target_cfg, grasp_offset) < hold_dist
+    target_slow = torch.linalg.vector_norm(target.data.root_lin_vel_w, dim=1) < max_target_speed
+    gate = lifted & held_near & target_slow
+
+    lin_cost = torch.sum(torch.square(robot.data.root_lin_vel_w[:, :2] / lin_vel_scale), dim=1)
+    ang_cost = torch.square(robot.data.root_ang_vel_w[:, 2] / ang_vel_scale)
+    return gate.float() / (1.0 + lin_cost + ang_cost)
+
+
 def _grasp_point_w(
     robot: Articulation,
     ee_cfg: SceneEntityCfg,

@@ -41,6 +41,7 @@ BC 预训练、数据检查、恢复训练及验证步骤见
 ```
 
 省略 `--demo_data` 为普通 PPO；再省略 `--resume --checkpoint ...` 为从零 PPO。
+训练入口加载带 `bc_pretrain=True` 标记的 BC checkpoint 后，会将动作标准差初始化为 `0.3`（兼容 `std` / `log_std`），随后仍由 PPO 学习。普通 PPO checkpoint 续训保留已保存的标准差。
 训练和策略播放默认普通环境；BC 微调请显式指定 BCPPO。采集默认 BCPPO，数据回放默认读取文件中的任务名。
 
 ```bash
@@ -74,13 +75,17 @@ BC 预训练、数据检查、恢复训练及验证步骤见
 
 | 阶段 | 起始环境步 | 行为 |
 |---|---:|---|
-| 1 | 0 | 与采集一致：link_001 前方 0.5 m，侧向 0，世界高度 0.10 m |
-| 2 | 96,000 | 保持阶段 1 的初始位置 |
-| 3 | 144,000 | 前方 0.4-1.2 m，侧向 ±0.6 m，世界高度 0.015-0.020 m |
+| 1 | 0 | link_001 前方 0.5 m，侧向 0，世界高度 0.10 m；夹爪跟踪辅助从 100% 线性减弱至 0 |
+| 2 | 96,000 | 保持阶段 1 的初始位置，完全关闭跟踪辅助 |
+| 3 | 144,000 | 前方 0.4-1.2 m，侧向 ±0.6 m，世界高度 0.015-0.020 m；继续关闭辅助 |
 
-位置范围中的 X/Y 是 link_001 局部坐标，前方为 -Y，侧向为 X；Z 是世界高度。采集和训练共用放置函数，所有阶段初速度为零，关闭主动靠近和随机速度，后续受重力和接触影响。阶段在环境重置时更新。按每次 PPO 更新 24 步计算，阶段 2/3 分别从 4000/6000 次更新开始；1500 次更新仍在阶段 1。`play.py --curriculum_stage` 使用同一组阈值。
+位置范围中的 X/Y 是 link_001 局部坐标，前方为 -Y，侧向为 X；Z 是世界高度。采集和训练共用放置函数，所有阶段初速度为零，随机速度事件关闭。位置阶段在环境重置时更新，跟踪强度在每个动作步更新。按每次 PPO 更新 24 步计算，阶段 2/3 分别从 4000/6000 次更新开始；训练 1500 次更新时辅助强度仍为 62.5%。要更早进入无辅助阶段，可调整 `ANTI_CURRICULUM_STAGE2_START_ITER`，它同时控制位置阶段和跟踪结束点。
 
-教师采集和录制动作回放会关闭目标靠近事件，保持静止目标条件。策略成功率评估应统一初始分布与成功口径；不要启用演示用的 `--scripted_grasp` 来统计策略成功率。
+`target_approach_stage1` 每个动作步将目标水平速度混合为 `(1 - strength) * 自然速度 + strength * 跟踪速度`，`strength = clamp((96000 - step) / 96000, 0, 1)`。跟踪速度朝向实际抓取点，比例增益 6/s，上限 0.20 m/s，接近时自动减速。触发范围 0.35 m，且抓取点高度不超过 0.12 m、物块尚未举起、夹爪仍张开。辅助保留竖直和角速度；闭爪、举起或进入第二阶段后停止写入速度，避免干预夹持和掉落。TensorBoard 的 `Curriculum/target_tracking_strength` 在回合重置时记录当前强度。
+
+PPO checkpoint 保存环境步数，续训时恢复课程进度；旧 checkpoint 按已完成迭代数估计，BC 初始化从第 0 步开始。
+
+教师采集和录制动作回放关闭目标跟踪事件。`play.py` 默认及第二、三阶段均关闭辅助，只有显式 `--curriculum_stage 1` 才启用辅助预览。成功率评估应统一初始分布与成功口径；辅助训练中的成功率不能直接作为无辅助成功率，也不要启用演示用的 `--scripted_grasp` 来统计策略成功率。
 
 ## 物理与接口
 
@@ -91,6 +96,7 @@ BC 预训练、数据检查、恢复训练及验证步骤见
 - 夹爪最大力矩 1.0 Nm；目标边长 0.032 m、质量 0.01 kg，摩擦 1.0 / 0.8。
 - `grasp` 奖励要求目标质心高度至少 0.12 m、距抓取点小于 0.2 m、线速度小于 3.6 m/s，达标即给基础奖励 1。额外高度奖励从 0.12 到 0.14 m 线性递增至 1，在 0.14–0.16 m 内保持为 1，超过 0.16 m 后按 `exp(-(z - 0.16) / 0.02)` 衰减。因此 0.13 m 时总奖励为 1.5，区间内为 2，0.17 m 约 1.607，0.18 m 约 1.368；任一门控不满足则为 0。以上为乘权重和时间步之前的原始值；`lift_dwell_time` 当前不延迟奖励。教师筛选仍使用相对举升 0.15 m、保持 0.5 s。
 - 掉落终止 `target_dropped`：本回合目标质心曾达到 `LIFT_HEIGHT_THRESHOLD`（当前 0.12 m），之后降到 0.05 m 以下即判失败终止（`terminated`，非超时）。初始自然下落不触发；局部重置只清除对应环境的举升记录。
+- 抓取后底盘减速奖励 `base_slow_after_grasp`：目标高度至少 0.12 m、距抓取点小于 0.2 m、目标速度小于 3.6 m/s 时，按 `1 / (1 + ||v_xy||² / 0.15² + wz² / 0.3²)` 奖励底盘低速和停稳。使用实际根节点速度，原始值最高 1；未抓起或脱手时为 0。权重 5.0，普通 PPO 在抓取阶段启用，BCPPO 从第 0 步启用。
 - 物理时间步 1/120 s，动作间隔 4 步，episode 10 s。
 
 ## 验证
@@ -102,6 +108,10 @@ BC 预训练、数据检查、恢复训练及验证步骤见
 ./isaaclab.sh -p "$PROJECT/tests/check_grasp_height_reward.py" --task Isaac-Mobile-Grasp-Eggtart-v0 --headless
 ./isaaclab.sh -p "$PROJECT/tests/check_target_drop_termination.py" --headless
 ./isaaclab.sh -p "$PROJECT/tests/check_target_drop_termination.py" --task Isaac-Mobile-Grasp-Eggtart-v0 --headless
+./isaaclab.sh -p "$PROJECT/tests/check_base_slow_reward.py" --headless
+./isaaclab.sh -p "$PROJECT/tests/check_base_slow_reward.py" --task Isaac-Mobile-Grasp-Eggtart-v0 --headless
+./isaaclab.sh -p "$PROJECT/tests/check_target_tracking_curriculum.py" --headless
+./isaaclab.sh -p "$PROJECT/tests/check_target_tracking_curriculum.py" --task Isaac-Mobile-Grasp-Eggtart-v0 --headless
 ```
 
 该检查分别创建两种真实环境，核对任务注册、44/9 维接口、三个阶段的位置/速度、课程边界、奖励权重和局部重置。BC/PPO/DAPG 的 CPU 回归测试命令见训练清单。

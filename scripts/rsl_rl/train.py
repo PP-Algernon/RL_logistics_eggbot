@@ -8,6 +8,7 @@
 """首先启动 Isaac Sim 模拟器"""
 
 import argparse
+import math
 import sys
 
 from isaaclab.app import AppLauncher
@@ -168,7 +169,33 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
         resume_path = cli_args.resolve_checkpoint(log_root_path, agent_cfg.load_run, agent_cfg.load_checkpoint)
         print(f"[INFO]: 从以下位置加载模型 checkpoint: {resume_path}")
         # 加载之前训练的模型
-        runner.load(resume_path)
+        checkpoint_infos = runner.load(resume_path)
+        if checkpoint_infos.get("bc_pretrain"):
+            # BC 的 MSE 只训练动作均值；加载后压低未训练的采样噪声。
+            # RSL-RL 3.1.2 的策略在 alg.policy，默认直接存 std；仅 log 模式存 log_std。
+            # 只初始化 BC，普通 PPO 续训保留 checkpoint 中学到的噪声。
+            policy = runner.alg.policy
+            initial_std = 0.05
+            with torch.no_grad():
+                if policy.state_dependent_std:
+                    raise ValueError("BC 噪声初始化要求 state_dependent_std=False")
+                if policy.noise_std_type == "scalar":
+                    policy.std.fill_(initial_std)
+                elif policy.noise_std_type == "log":
+                    policy.log_std.fill_(math.log(initial_std))
+                else:
+                    raise ValueError(f"不支持的 noise_std_type: {policy.noise_std_type}")
+            print(f"[BC] 动作标准差已初始化为 {initial_std}（{policy.noise_std_type} 模式），后续由 PPO 继续学习")
+        else:
+            # 新 checkpoint 保存精确的环境步数；旧 PPO checkpoint 的 iter 是
+            # 最后完成的更新索引，按 (iter + 1) * rollout 长度估计课程进度。
+            curriculum_step = runner.loaded_env_step_counter
+            if curriculum_step is None:
+                curriculum_step = (runner.current_learning_iteration + 1) * runner.num_steps_per_env
+                print("[INFO] 旧 checkpoint 未记录环境步数，按已完成迭代数恢复课程进度")
+            env.unwrapped.common_step_counter = int(curriculum_step)
+            env.reset()
+            print(f"[INFO] 已恢复课程进度: {curriculum_step} 环境步")
 
     if args_cli.demo_data:
         from pathlib import Path

@@ -71,7 +71,8 @@ CURRICULUM_STAGE4_START_ITER = 4000
 CURRICULUM_DAPG_STAGE_START_ITER = 150
 
 # 逆向课程学习：三阶段目标初始位置和行为控制
-# 阶段 1/2 (0-6000 iter): 与采集一致的固定位置，不主动移动目标
+# 阶段 1 (0-4000 iter): 固定初始位置，低位夹爪跟踪辅助从强到弱渐退
+# 阶段 2 (4000-6000 iter): 保持固定位置，关闭跟踪辅助
 # 阶段 3 (6000+ iter): 扩大初始位置范围，继续由重力和接触决定运动
 ANTI_CURRICULUM_STAGE1_START_ITER = 0
 ANTI_CURRICULUM_STAGE2_START_ITER = 4000
@@ -234,8 +235,27 @@ class EventCfg:
             "asset_cfg": SceneEntityCfg("target"),
         },
     )
-    # 与采集一致：不施加靠近辅助或随机速度，物体仍受重力和接触影响。
-    target_approach_stage1 = None
+    # 每个动作步更新一次；第一阶段强辅助逐渐退到 0，之后完全停止写目标速度。
+    target_approach_stage1 = EventTerm(
+        func=mdp.target_approach_ee_direction,
+        mode="interval",
+        interval_range_s=(0.0, 0.0),
+        params={
+            "approach_speed": 0.20,
+            "activation_distance": 0.35,
+            "approach_gain": 6.0,
+            "max_grasp_height": LIFT_HEIGHT_THRESHOLD,
+            "lift_height_threshold": LIFT_HEIGHT_THRESHOLD,
+            "gripper_closed_threshold": GRIPPER_CLOSED_THRESHOLD,
+            "robot_cfg": SceneEntityCfg("robot"),
+            "target_cfg": SceneEntityCfg("target"),
+            "ee_cfg": SceneEntityCfg("robot", body_names="link_005"),
+            "gripper_cfg": SceneEntityCfg("robot", joint_names=[EGGTART_GRIPPER_JOINT_NAME]),
+            "grasp_offset": EGGTART_EE_GRASP_OFFSET,
+            "stage1_start_step": ANTI_CURRICULUM_STAGE1_START_ITER * 24,
+            "stage1_end_step": ANTI_CURRICULUM_STAGE2_START_ITER * 24,
+        },
+    )
     randomize_target_velocity = None
 
 
@@ -406,6 +426,22 @@ class RewardsCfg:
         },
     )
 
+    # 抓起后鼓励底盘减速并停稳，门控与 grasp 保持一致。
+    base_slow_after_grasp = RewTerm(
+        func=mdp.base_slow_after_grasp,
+        params={
+            "lift_height_threshold": LIFT_HEIGHT_THRESHOLD,
+            "lin_vel_scale": 0.15,
+            "ang_vel_scale": 0.3,
+            "hold_dist": 0.2,
+            "max_target_speed": 3.6,
+            "robot_cfg": SceneEntityCfg("robot"),
+            "target_cfg": SceneEntityCfg("target"),
+            "ee_cfg": SceneEntityCfg("robot", body_names="link_005"),
+            "grasp_offset": EGGTART_EE_GRASP_OFFSET,
+        },
+    )
+
     # ========== 约束项（全程） ==========
     # 治 bang-bang 抖动：罚动作指令的跳变。
     # 臂+爪 6 维在 ±1 间来回跳时 action_rate_l2 ≈ 24，-0.02 让代价约 0.48，
@@ -446,6 +482,8 @@ class CurriculumCfg:
     阶段 2 (18000-36000 步): 机械臂到达
     阶段 3 (36000+ 步): 抓取
     """
+    target_tracking_strength = CurrTerm(func=mdp.target_tracking_curriculum)
+
     # ========== 阶段 1: 底盘导航 ==========
     base_approach_sched = CurrTerm(
         func=mdp.reward_weight_schedule,
@@ -516,6 +554,11 @@ class CurriculumCfg:
         params={"term_name": "retract_bonus_lift", "schedule": [(0, 0.0), (CURRICULUM_STAGE3_START_ITER*24, 5.0)]},
     )
 
+    base_slow_after_grasp_sched = CurrTerm(
+        func=mdp.reward_weight_schedule,
+        params={"term_name": "base_slow_after_grasp", "schedule": [(0, 0.0), (CURRICULUM_STAGE3_START_ITER*24, 5.0)]},
+    )
+
     # ========== 约束项 ==========
     joint_limits_sched = CurrTerm(
         func=mdp.reward_weight_schedule,
@@ -539,6 +582,8 @@ class BCCurriculumCfg:
     """BC 预训练后的课程
     """
 
+    target_tracking_strength = CurrTerm(func=mdp.target_tracking_curriculum)
+
     base_approach_sched = CurrTerm(
         func=mdp.reward_weight_schedule,
         params={"term_name": "base_approach", "schedule": [(0, 1.0)]},
@@ -554,7 +599,7 @@ class BCCurriculumCfg:
     )
     grasp_posture_guide_sched = CurrTerm(
             func=mdp.reward_weight_schedule,
-            params={"term_name": "grasp_posture_guide", "schedule": [(0, 1.0)]},
+            params={"term_name": "grasp_posture_guide", "schedule": [(0, 0.0)]},
     )
 
     ee_reach_sched = CurrTerm(
@@ -584,8 +629,8 @@ class BCCurriculumCfg:
         params={"term_name": "target_lift_progress", "schedule": [(0, 10.0)]},
     )
     gripper_holding_object_sched = CurrTerm(
-            func=mdp.reward_weight_schedule,
-            params={"term_name": "gripper_holding_object", "schedule": [(0, 0.0)]},
+        func=mdp.reward_weight_schedule,
+        params={"term_name": "gripper_holding_object", "schedule": [(0, 0.0)]},
     )
     grasp_sched = CurrTerm(
         func=mdp.reward_weight_schedule,
@@ -594,6 +639,10 @@ class BCCurriculumCfg:
     retract_bonus_lift_sched = CurrTerm(
         func=mdp.reward_weight_schedule,
         params={"term_name": "retract_bonus_lift", "schedule": [(0, 35.0)]},
+    )
+    base_slow_after_grasp_sched = CurrTerm(
+        func=mdp.reward_weight_schedule,
+        params={"term_name": "base_slow_after_grasp", "schedule": [(0, 5.0)]},
     )
 
     joint_limits_sched = CurrTerm(
@@ -610,7 +659,7 @@ class BCCurriculumCfg:
     )
     base_vel_sched = CurrTerm(
         func=mdp.reward_weight_schedule,
-        params={"term_name": "base_vel", "schedule": [(0, -0.025)]},
+        params={"term_name": "base_vel", "schedule": [(0, -0.05)]},
     )
 
 
@@ -664,7 +713,7 @@ class MobileGraspEnvCfg(ManagerBasedRLEnvCfg):
 
         # 通用设置
         self.decimation = 4
-        self.episode_length_s = 10.0
+        self.episode_length_s = 8.0
         self.sim.render_interval = self.decimation
         self.viewer.eye = (4.0, 4.0, 3.0)
         # 仿真设置

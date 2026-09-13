@@ -104,6 +104,10 @@ def main():
 
     # Evaluation uses the same config with observation noise disabled.
     env_cfg.observations.policy.enable_corruption = False
+    # Only an explicit stage-1 preview should use target tracking assistance.
+    if args_cli.curriculum_stage != 1:
+        env_cfg.events.target_approach_stage1 = None
+        print("[INFO] 策略评估已关闭目标跟踪辅助（--curriculum_stage 1 可预览辅助效果）")
 
     # create isaac environment
     env = gym.make(args_cli.task, cfg=env_cfg, render_mode="rgb_array" if args_cli.video else None)

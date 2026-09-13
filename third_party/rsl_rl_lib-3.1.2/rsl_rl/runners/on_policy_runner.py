@@ -58,6 +58,7 @@ class OnPolicyRunner:
         self.tot_time = 0
         self.current_learning_iteration = 0
         self.demo_dataset_metadata = {}
+        self.loaded_env_step_counter = None
         self.git_status_repos = [rsl_rl.__file__]
 
     def learn(self, num_learning_iterations: int, init_at_random_ep_len: bool = False) -> None:
@@ -297,6 +298,9 @@ class OnPolicyRunner:
             "iter": self.current_learning_iteration,
             "infos": infos,
         }
+        base_env = getattr(self.env, "unwrapped", self.env)
+        if hasattr(base_env, "common_step_counter"):
+            saved_dict["env_step_counter"] = int(base_env.common_step_counter)
         if self.alg.demos is not None:
             saved_dict["dapg_state_dict"] = self.alg.dapg_state_dict()
         if self.demo_dataset_metadata:
@@ -314,6 +318,9 @@ class OnPolicyRunner:
     def load(self, path: str, load_optimizer: bool = True, map_location: str | None = None) -> dict:
         loaded_dict = torch.load(path, weights_only=False, map_location=map_location or self.device)
         infos = loaded_dict.get("infos") or {}
+        # Expose the saved curriculum clock to callers; evaluation may explicitly
+        # select a different stage, so load() must not mutate its environment.
+        self.loaded_env_step_counter = 0 if infos.get("bc_pretrain") else loaded_dict.get("env_step_counter")
         if infos.get("bc_pretrain"):
             if infos.get("obs_mean") is not None or infos.get("obs_std") is not None:
                 raise ValueError("BC checkpoint uses external normalization; align it with the policy before loading")

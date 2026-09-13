@@ -31,22 +31,23 @@ try:
     assert type(standard_cfg.curriculum) is CurriculumCfg
     assert type(bc_cfg.curriculum) is BCCurriculumCfg
     cfg = bc_cfg if args.task == BC_TASK else standard_cfg
-    assert cfg.events.target_approach_stage1 is None
+    assert cfg.events.target_approach_stage1.mode == "interval"
     assert cfg.events.randomize_target_velocity is None
     weights = {
         "base_approach": 1.0, "ee_reach": 2.0, "grasp_posture_guide": 1.5,
         "target_lift_progress": 10.0, "grasp": 30.0, "action_rate": -0.01, "joint_limits": -0.3,
         "gripper_holding_object": 5.0,
         "retract_bonus_lift": 5.0,
+        "base_slow_after_grasp": 5.0,
     }
     env = gym.make(args.task, cfg=cfg).unwrapped
     params = env.event_manager.get_term_cfg("reset_target").params
     second, third = params["stage2_start_step"], params["stage3_start_step"]
     robot, target = env.scene["robot"], env.scene["target"]
     link = params["reference_cfg"].body_ids[0]
-    assert len(env.reward_manager.active_terms) == 17
+    assert len(env.reward_manager.active_terms) == 18
     assert env.action_manager.total_action_dim == 9
-    assert "interval" not in env.event_manager.available_modes
+    assert env.event_manager.active_terms["interval"] == ["target_approach_stage1"]
 
     for step, stage in ((0, 1), (second - 1, 1), (second, 2), (third - 1, 2), (third, 3)):
         env.common_step_counter = step

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 from typing import TYPE_CHECKING
 
 import torch
@@ -63,6 +64,13 @@ def randomize_target_velocity(
     asset.write_root_velocity_to_sim(root_vel, env_ids=env_ids)
 
 
+def target_tracking_strength(current_step: int, stage1_end_step: int, stage1_start_step: int = 0) -> float:
+    """第一阶段由 1 线性衰减到 0，第二阶段起恒为 0。"""
+    if stage1_end_step <= stage1_start_step:
+        raise ValueError("目标跟踪课程的结束步数必须大于开始步数")
+    return min(1.0, max(0.0, (stage1_end_step - current_step) / (stage1_end_step - stage1_start_step)))
+
+
 def target_approach_ee_direction(
     env: ManagerBasedRLEnv,
     env_ids: torch.Tensor,
@@ -74,39 +82,32 @@ def target_approach_ee_direction(
     grasp_offset: tuple[float, float, float] | None = None,
     direction_offset: tuple[float, float, float] | None = None,
     stage1_end_step: int = 64000,
+    stage1_start_step: int = 0,
+    approach_gain: float = 6.0,
+    max_grasp_height: float = 0.12,
+    lift_height_threshold: float = 0.12,
+    gripper_cfg: SceneEntityCfg = SceneEntityCfg("robot", joint_names=["end_effector_joint"]),
+    gripper_closed_threshold: float = 0.35,
 ) -> None:
-    """逆向课程学习：目标主动缓慢靠近末端方向点（阶段1辅助学习）
+    """第一阶段帮助地面物块对准低位夹爪，随全局训练步数渐退。
 
-    当抓取点距离目标小于 activation_distance 时，目标会以 approach_speed 的速度
-    缓慢移动向 direction_offset 点，帮助策略在初期更容易完成"对准-闭合"动作。
+    夹爪张开、抓取点低于 max_grasp_height、目标未举起且距离在触发范围内时，
+    用比例控制将目标水平速度引向跟踪点，速度上限 approach_speed (m/s)。
+    越靠近跟踪点速度越小，防止恒速穿过夹爪；direction_offset 省略时跟踪抓取点。
+    approach_gain 单位为 1/s。辅助强度在 stage1_start_step 到 stage1_end_step
+    之间线性下降，用于混合自然速度和跟踪速度；第二阶段起完全不写物体状态。
 
-    仅在 env.common_step_counter < stage1_end_step 时生效（阶段1）。
-
-    典型用法（阶段1事件）:
-        - activation_distance = 0.15  # 抓取点进入15cm内才触发
-        - approach_speed = 0.05       # 目标以5cm/s缓慢靠近
-        - grasp_offset = EGGTART_EE_GRASP_OFFSET
-        - direction_offset = EGGTART_EE_GRASP_DERECT_OFFSET
-        - stage1_end_step = 64000    # 阶段1结束步数
-
-    Args:
-        env: 环境实例
-        env_ids: 要更新的环境索引
-        approach_speed: 目标靠近的速度（m/s）
-        activation_distance: 触发距离阈值（m）
-        robot_cfg: 机器人实体配置
-        target_cfg: 目标实体配置
-        ee_cfg: link5 实体配置
-        grasp_offset: 抓取点相对 link5 的偏移（局部系）
-        direction_offset: 方向参考点相对 link5 的偏移（局部系）
-        stage1_end_step: 阶段1结束步数（超过此步数则不执行）
+    仅写激活环境的水平速度，保留竖直和角速度，绝不移动目标位姿或将其悬空。
+    闭爪或举起后立即停止写速度，使夹持、提升和掉落由物理接触决定。
     """
     from isaaclab.assets import Articulation
     from isaaclab.utils.math import quat_apply
 
-    # 阶段1结束后不执行
-    if env.common_step_counter >= stage1_end_step:
+    strength = target_tracking_strength(env.common_step_counter, stage1_end_step, stage1_start_step)
+    if strength == 0.0 or approach_speed == 0.0:
         return
+    if not all(math.isfinite(value) and value > 0 for value in (approach_speed, approach_gain, activation_distance)):
+        raise ValueError("跟踪速度、比例增益和触发距离必须为有限正数")
 
     robot: Articulation = env.scene[robot_cfg.name]
     target: RigidObject = env.scene[target_cfg.name]
@@ -114,19 +115,15 @@ def target_approach_ee_direction(
     if env_ids is None:
         env_ids = target._ALL_INDICES  # type: ignore[attr-defined]
 
-    if grasp_offset is None or direction_offset is None:
-        # 没有提供偏移量，不执行靠近逻辑
-        return
-
     # 计算抓取点和方向点的世界坐标
     ee_pos_w = robot.data.body_pos_w[env_ids, ee_cfg.body_ids[0]]
     ee_quat_w = robot.data.body_quat_w[env_ids, ee_cfg.body_ids[0]]
 
-    grasp_off = torch.tensor(grasp_offset, device=env.device, dtype=ee_pos_w.dtype)
+    grasp_off = torch.tensor(grasp_offset or (0.0, 0.0, 0.0), device=env.device, dtype=ee_pos_w.dtype)
     grasp_off = grasp_off.unsqueeze(0).expand(len(env_ids), -1)
     grasp_pos_w = ee_pos_w + quat_apply(ee_quat_w, grasp_off)
 
-    dir_off = torch.tensor(direction_offset, device=env.device, dtype=ee_pos_w.dtype)
+    dir_off = torch.tensor(direction_offset or grasp_offset or (0.0, 0.0, 0.0), device=env.device, dtype=ee_pos_w.dtype)
     dir_off = dir_off.unsqueeze(0).expand(len(env_ids), -1)
     dir_pos_w = ee_pos_w + quat_apply(ee_quat_w, dir_off)
 
@@ -134,32 +131,27 @@ def target_approach_ee_direction(
     target_pos = target.data.root_pos_w[env_ids]
     dist_to_grasp = torch.norm(grasp_pos_w - target_pos, dim=1)
 
-    # 只有距离小于阈值的环境才激活靠近行为
-    active_mask = dist_to_grasp < activation_distance
-
-    if not active_mask.any():
+    gripper = env.scene[gripper_cfg.name]
+    gripper_open = gripper.data.joint_pos[env_ids, gripper_cfg.joint_ids[0]] > gripper_closed_threshold
+    active_mask = (
+        (dist_to_grasp < activation_distance)
+        & (grasp_pos_w[:, 2] <= max_grasp_height)
+        & (target_pos[:, 2] < lift_height_threshold)
+        & gripper_open
+    )
+    active_indices = active_mask.nonzero(as_tuple=False).flatten()
+    if active_indices.numel() == 0:
         return
 
-    # 计算目标应该移动的方向（从当前位置指向方向点）
-    to_direction = dir_pos_w - target_pos
-    # 只考虑水平方向（保持高度不变）
-    to_direction[:, 2] = 0
-    direction_dist = torch.norm(to_direction, dim=1, keepdim=True)
-
-    # 归一化方向向量
-    to_direction = to_direction / (direction_dist + 1e-6)
-
-    # 设置速度：active 的环境以 approach_speed 靠近，其他保持原速度
-    new_vel = target.data.root_vel_w[env_ids].clone()
-
-    # 只修改激活的环境
-    active_indices = torch.where(active_mask)[0]
-    if len(active_indices) > 0:
-        new_vel[active_indices, 0] = to_direction[active_indices, 0] * approach_speed
-        new_vel[active_indices, 1] = to_direction[active_indices, 1] * approach_speed
-        new_vel[active_indices, 2] = 0  # 保持高度
-
-    target.write_root_velocity_to_sim(new_vel, env_ids=env_ids)
+    active_ids = env_ids[active_indices]
+    delta_xy = (dir_pos_w - target_pos)[active_indices, :2]
+    # 单步目标位移不超过剩余距离，末端附近平滑收敛。
+    tracking_vel = delta_xy * min(approach_gain, 1.0 / env.step_dt)
+    speed = torch.linalg.vector_norm(tracking_vel, dim=1, keepdim=True)
+    tracking_vel *= torch.clamp(approach_speed / speed.clamp_min(1e-6), max=1.0)
+    new_vel = target.data.root_vel_w[active_ids].clone()
+    new_vel[:, :2] = torch.lerp(new_vel[:, :2], tracking_vel, strength)
+    target.write_root_velocity_to_sim(new_vel, env_ids=active_ids)
 
 
 def place_target_in_reference_frame(

@@ -334,6 +334,7 @@ class ScriptedTeacher:
             robot_cfg=self.robot_cfg,
             target_cfg=self.target_cfg,
             ee_cfg=self.ee_cfg,
+            gripper_cfg=self.gripper_cfg,
             grasp_offset=tuple(self.grasp_offset.tolist()),
             direction_offset=tuple(self.direction_offset.tolist()),
         )

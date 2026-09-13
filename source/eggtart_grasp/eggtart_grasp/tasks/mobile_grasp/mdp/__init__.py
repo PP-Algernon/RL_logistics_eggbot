@@ -4,7 +4,7 @@ from isaaclab.envs.mdp import *  # noqa: F401, F403
 
 from .observations import *  # noqa: F401, F403
 from .actions import MecanumBaseAction, MecanumBaseActionCfg, HolonomicBaseAction, HolonomicBaseActionCfg, GripperForceAction, GripperForceActionCfg  # noqa: F401
-from .curriculums import reward_weight_schedule, reward_param_schedule  # noqa: F401
+from .curriculums import reward_weight_schedule, reward_param_schedule, target_tracking_curriculum  # noqa: F401
 from .target import randomize_target_velocity, target_approach_ee_direction, reset_target_curriculum  # noqa: F401
 from .terminations import base_tipped, target_dropped  # noqa: F401
 
