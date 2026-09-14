@@ -1,62 +1,17 @@
-> 已归档（2026-09-14）。原路径：`.doc/TRAINING_GUIDE.md`。本文保留当时方案、参数与实验记录，当前操作请见[文档索引](../README.md)和[训练指南](../TODO_BC_PPO_DAPG.md)。
-
-> 历史记录：当前保留 `Isaac-Mobile-Grasp-Eggtart-v0` 和 `Isaac-Mobile-Grasp-Eggtart-BCPPO-v0`，分别使用普通奖励课程和 `BCCurriculumCfg`。本文的旧配置与命令请以[训练清单](../TODO_BC_PPO_DAPG.md)为准。
-
 # 纯状态训练快速启动指南
+
+> **已归档（2026-09-14）**  
+> 原路径：`.doc/TRAINING_GUIDE.md`。本文保留当时方案、参数与实验记录，当前操作请见[文档索引](../README.md)和[训练指南](../TODO_BC_PPO_DAPG.md)。
+
+> **历史记录**  
+> 当前保留 `Isaac-Mobile-Grasp-Eggtart-v0` 和 `Isaac-Mobile-Grasp-Eggtart-BCPPO-v0`，分别使用普通奖励课程和 `BCCurriculumCfg`。本文的旧配置与命令请以[训练清单](../TODO_BC_PPO_DAPG.md)为准。
 
 本指南帮助你使用**纯状态观测**（无视觉传感器）开始训练移动抓取任务。
 
----
 
-## **✅ 当前奖励设计**
+## 🚀 开始训练
 
-你的奖励函数已经配置完善，包含 4 个阶段性奖励 + 2 个惩罚项：
-
-### **阶段性奖励**
-
-| 阶段 | 奖励项 | 权重 | 说明 |
-|------|--------|------|------|
-| ① | `base_approach` | 1.0 | 底盘在 XY 平面接近目标（tanh shaping） |
-| ② | `ee_reach` | 2.0 | 末端执行器接近目标（tanh shaping） |
-| ② | `ee_distance` | -0.1 | 末端到目标的 L2 距离惩罚 |
-| ③ | `grasp` | 5.0 | 抓取 bonus（末端靠近 **且** 夹爪闭合） |
-| ④ | `retract` | 2.0 | 抓取后机械臂收回到 home 姿态 |
-
-### **正则化惩罚**
-
-| 惩罚项 | 权重 | 说明 |
-|--------|------|------|
-| `action_rate` | -0.001 | 动作平滑性惩罚（相邻帧动作差） |
-| `joint_vel` | -0.0001 | 机械臂关节速度惩罚 |
-
-**位置**: [mobile_grasp_env_cfg.py:212-242](../../source/eggtart_grasp/eggtart_grasp/tasks/mobile_grasp/mobile_grasp_env_cfg.py)
-
----
-
-## **🎯 观测空间（纯状态）**
-
-当前观测包含以下项（**无图像**）：
-
-| 观测项 | 维度 | 说明 |
-|--------|------|------|
-| `joint_pos` | N | 所有关节的相对位置 |
-| `joint_vel` | N | 所有关节的相对速度 |
-| `base_lin_vel` | 3 | 底盘线速度（体坐标系） |
-| `base_ang_vel` | 3 | 底盘角速度（体坐标系） |
-| `target_position_b` | 3 | 目标在底盘坐标系下的位置 |
-| `ee_to_target_b` | 3 | 末端到目标的向量（底盘系） |
-| `target_lin_vel` | 3 | 目标的世界系线速度 |
-| `actions` | M | 上一步的动作 |
-
-**所有观测都在底盘坐标系下**，策略对底盘世界位姿不变。
-
-**位置**: [mobile_grasp_env_cfg.py:106-139](../../source/eggtart_grasp/eggtart_grasp/tasks/mobile_grasp/mobile_grasp_env_cfg.py)
-
----
-
-## **🚀 开始训练**
-
-### **步骤 1: 验证环境已安装**
+### 步骤 1: 验证环境已安装
 
 ```bash
 cd /home/pu/RL-ws/ProjectLearning/Eggtart-logistics-robot
@@ -72,7 +27,7 @@ Isaac-Mobile-Grasp-Eggtart-v0
 Isaac-Mobile-Grasp-Eggtart-Play-v0
 ```
 
-### **步骤 2: 快速可视化测试**
+### 步骤 2: 快速可视化测试
 
 先用少量环境测试是否正常运行：
 
@@ -88,7 +43,7 @@ Isaac-Mobile-Grasp-Eggtart-Play-v0
 - 底盘和机械臂能否正常运动？
 - 有无报错？
 
-### **步骤 3: 开始训练（小规模测试）**
+### 步骤 3: 开始训练（小规模测试）
 
 先用少量环境验证训练流程：
 
@@ -105,7 +60,7 @@ Isaac-Mobile-Grasp-Eggtart-Play-v0
 - 奖励是否在变化？
 - 有无 NaN 或异常值？
 
-### **步骤 4: 全规模训练**
+### 步骤 4: 全规模训练
 
 确认无误后，启动完整训练：
 
@@ -124,7 +79,7 @@ logs/rsl_rl/eggtart_mobile_grasp/<timestamp>/
 └── summaries/           # TensorBoard 日志
 ```
 
-### **步骤 5: 监控训练进度**
+### 步骤 5: 监控训练进度
 
 启动 TensorBoard：
 
@@ -141,7 +96,7 @@ tensorboard --logdir logs/rsl_rl/eggtart_mobile_grasp
 
 ---
 
-## **⚙️ 训练配置参数**
+## ⚙️ 训练配置参数
 
 当前训练超参数（RSL-RL PPO）：
 
@@ -168,9 +123,9 @@ lam = 0.95
 
 ---
 
-## **🔧 可能需要的调整**
+## 🔧 可能需要的调整
 
-### **如果训练不稳定（NaN/发散）**
+### 如果训练不稳定（NaN/发散）
 
 1. **降低学习率**：
    ```python
@@ -192,112 +147,9 @@ lam = 0.95
    )
    ```
 
-### **如果训练太慢**
+## 📋 任务注册说明
 
-1. **减少环境数量**（牺牲样本效率）：
-   ```bash
-   --num_envs 1024  # 从 2048 降到 1024
-   ```
-
-2. **减少仿真精度**（牺牲物理准确性）：
-   ```python
-   # mobile_grasp_env_cfg.py
-   self.sim.dt = 1.0 / 60.0  # 从 120Hz 改为 60Hz
-   self.decimation = 2       # 从 4 改为 2
-   ```
-
-### **如果机器人学不会抓取**
-
-1. **增大抓取奖励权重**：
-   ```python
-   # mobile_grasp_env_cfg.py - RewardsCfg
-   grasp = RewTerm(..., weight=10.0)  # 从 5.0 改为 10.0
-   ```
-
-2. **放宽抓取判定阈值**：
-   ```python
-   # mobile_grasp_env_cfg.py
-   GRASP_REACH_THRESHOLD = 0.08  # 从 0.05 改为 0.08（更宽松）
-   ```
-
-3. **使用课程学习**（见 TODO_GUIDE.md）
-
----
-
-## **📊 预期训练效果**
-
-### **训练时间**
-
-| 环境数 | GPU | 迭代/分钟 | 收敛时间（估算） |
-|--------|-----|----------|----------------|
-| 2048 | RTX 3090 | ~3-5 | 1-2 小时 |
-| 1024 | RTX 3070 | ~2-3 | 2-3 小时 |
-| 512 | RTX 2080 Ti | ~1-2 | 3-4 小时 |
-
-### **训练阶段**
-
-1. **前 200 iter**: 学习底盘移动，靠近目标
-2. **200-600 iter**: 学习末端伸展，接近目标
-3. **600-1000 iter**: 学习夹爪闭合，触发抓取 bonus
-4. **1000+ iter**: 学习抓取后收臂，完整任务
-
----
-
-## **🎬 回放训练好的模型**
-
-训练完成后，评估策略：
-
-```bash
-./isaaclab.sh -p scripts/rsl_rl/play.py \
-    --task Isaac-Mobile-Grasp-Eggtart-Play-v0 \
-    --num_envs 16 \
-    --checkpoint logs/rsl_rl/eggtart_mobile_grasp/<timestamp>/model_1500.pt
-```
-
-**评估指标**：
-- 成功率：多少个环境成功抓取？
-- 平均时长：从 reset 到抓取用了多少秒？
-- 收臂行为：抓取后是否正确收回？
-
----
-
-## **🐛 常见问题排查**
-
-### Q1: 报错 "Robot asset is MISSING"
-**A**: 检查 `eggtart_grasp` 是否安装：
-```bash
-./isaaclab.sh -p -m pip list | grep eggtart
-```
-
-### Q2: 底盘不动 / 机械臂不动
-**A**: 检查动作空间配置，确认 `ActionsCfg` 正确。
-
-### Q3: 目标物体掉落或飞走
-**A**: 目标已禁用重力且有初速，这是预期行为（移动目标）。
-
-### Q4: 训练曲线震荡剧烈
-**A**: 
-1. 降低学习率
-2. 增加 `num_mini_batches`
-3. 检查奖励尺度是否合理
-
----
-
-## **📝 训练前检查清单**
-
-在开始训练前，确认：
-
-- [ ] 环境已安装并注册
-- [ ] 可视化测试通过（play.py）
-- [ ] 小规模训练无报错（256 envs, 100 iter）
-- [ ] TensorBoard 日志正常记录
-- [ ] 有足够的磁盘空间（至少 10GB）
-- [ ] GPU 显存足够（2048 envs 约需 8-10GB）
-
----
-
-
-## 需要注册新任务
+### 需要注册新任务
 
 在你的任务注册文件中（通常是 `agents/__init__.py`），添加：
 
@@ -328,9 +180,9 @@ print('LIFT_HEIGHT_THRESHOLD:', MobileGraspEnvStaticCfg.LIFT_HEIGHT_THRESHOLD)
 
 ---
 
-### 2. 训练监控
+## 📈 训练监控详解
 
-#### 启动训练
+### 启动训练
 
 ```bash
 ./isaaclab.sh -p scripts/rsl_rl/train.py \
@@ -338,7 +190,7 @@ print('LIFT_HEIGHT_THRESHOLD:', MobileGraspEnvStaticCfg.LIFT_HEIGHT_THRESHOLD)
     --num_envs 2048
 ```
 
-#### 查看训练曲线（TensorBoard）
+### 查看训练曲线（TensorBoard）
 
 训练日志保存在 `logs/rsl_rl/eggtart_mobile_grasp/<时间戳>/`
 
@@ -368,7 +220,7 @@ tensorboard --logdir logs/rsl_rl/eggtart_mobile_grasp
    - `Perf/total_time`：训练时间
    - `Perf/fps`：仿真帧率
 
-#### 判断训练效果
+### 判断训练效果
 
 - **正常收敛**：
   - `mean_reward` 持续上升并趋于平稳
@@ -382,7 +234,7 @@ tensorboard --logdir logs/rsl_rl/eggtart_mobile_grasp
 
 ---
 
-### 3. 超参数调优
+## 🎛️ 超参数调优
 
 **文件位置**：`source/eggtart_grasp/eggtart_grasp/tasks/mobile_grasp/config/eggtart/agents/rsl_rl_ppo_cfg.py`
 
@@ -405,7 +257,7 @@ self.episode_length_s = 10.0  # 如果任务太难可延长到 15.0
 
 ---
 
-## 奖励设计教程
+## 🎨 奖励设计教程
 
 ### 原理
 
@@ -549,7 +401,7 @@ def angle_alignment_reward(
 
 ---
 
-## 下一步工作
+## 📌 下一步工作
 
 1. **训练并观察曲线**
    - 启动训练，运行至少 500 iterations
@@ -569,7 +421,7 @@ def angle_alignment_reward(
 
 ---
 
-## 常见问题
+## ❓ 常见问题
 
 **Q: 训练很慢怎么办？**  
 A: 
@@ -602,3 +454,73 @@ A: 训练完成后，在 `logs/.../exported/` 目录会自动生成：
 ---
 
 祝训练顺利！🚀
+
+
+### 如果训练太慢
+
+1. **减少环境数量**（牺牲样本效率）：
+   ```bash
+   --num_envs 1024  # 从 2048 降到 1024
+   ```
+
+2. **减少仿真精度**（牺牲物理准确性）：
+   ```python
+   # mobile_grasp_env_cfg.py
+   self.sim.dt = 1.0 / 60.0  # 从 120Hz 改为 60Hz
+   self.decimation = 2       # 从 4 改为 2
+   ```
+---
+
+## 🎬 回放训练好的模型
+
+训练完成后，评估策略：
+
+```bash
+./isaaclab.sh -p scripts/rsl_rl/play.py \
+    --task Isaac-Mobile-Grasp-Eggtart-Play-v0 \
+    --num_envs 16 \
+    --checkpoint logs/rsl_rl/eggtart_mobile_grasp/<timestamp>/model_1500.pt
+```
+
+**评估指标**：
+- 成功率：多少个环境成功抓取？
+- 平均时长：从 reset 到抓取用了多少秒？
+- 收臂行为：抓取后是否正确收回？
+
+---
+
+## 🐛 常见问题排查
+
+### Q1: 报错 "Robot asset is MISSING"
+**A**: 检查 `eggtart_grasp` 是否安装：
+```bash
+./isaaclab.sh -p -m pip list | grep eggtart
+```
+
+### Q2: 底盘不动 / 机械臂不动
+**A**: 检查动作空间配置，确认 `ActionsCfg` 正确。
+
+### Q3: 目标物体掉落或飞走
+**A**: 目标已禁用重力且有初速，这是预期行为（移动目标）。
+
+### Q4: 训练曲线震荡剧烈
+**A**: 
+1. 降低学习率
+2. 增加 `num_mini_batches`
+3. 检查奖励尺度是否合理
+
+---
+
+## 📝 训练前检查清单
+
+在开始训练前，确认：
+
+- [ ] 环境已安装并注册
+- [ ] 可视化测试通过（play.py）
+- [ ] 小规模训练无报错（256 envs, 100 iter）
+- [ ] TensorBoard 日志正常记录
+- [ ] 有足够的磁盘空间（至少 10GB）
+- [ ] GPU 显存足够（2048 envs 约需 8-10GB）
+
+---
+
