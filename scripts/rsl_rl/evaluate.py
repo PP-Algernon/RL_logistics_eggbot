@@ -33,7 +33,10 @@ def parse_args():
     parser.add_argument("--observation_noise", action="store_true", help="开启训练中的观测噪声；默认关闭")
     parser.add_argument("--lift_height", type=float, help="成功举升的世界高度（米），默认任务 LIFT_HEIGHT_THRESHOLD")
     parser.add_argument("--dwell_time", type=float, help="连续举升保持时间（秒），默认 LIFT_SUCCESS_DWELL_TIME")
-    parser.add_argument("--episode_length_s", type=float, help="每回合时限，默认当前任务配置")
+    parser.add_argument(
+        "--success_timeout_s", "--episode_length_s", dest="episode_length_s", type=float,
+        help="每个实例未成功时自动重置的时限（仿真秒）；默认当前任务时限，旧参数名仍可用",
+    )
     parser.add_argument("--output", type=Path, help="JSON 报告路径；默认 checkpoint 同级 evaluation/ 目录")
     cli_args.add_rsl_rl_args(parser)
     AppLauncher.add_app_launcher_args(parser)
@@ -49,18 +52,44 @@ def parse_args():
     return args
 
 
+def configure_episode_termination(cfg, *, height, dwell, lift_dwell_time, timeout_s=None):
+    """Enable success and per-instance timeout resets on the evaluation config.
+
+    Isaac Lab resets only the finished instances inside env.step(), including
+    their robot/target states, episode clocks and stateful termination terms.
+    """
+    from isaaclab.envs.mdp import time_out
+    from isaaclab.managers import SceneEntityCfg, TerminationTermCfg
+    from eggtart_grasp.tasks.mobile_grasp.mdp.terminations import LiftSuccess
+
+    timeout = cfg.episode_length_s if timeout_s is None else timeout_s
+    if not math.isfinite(timeout) or timeout <= 0:
+        raise ValueError("--success_timeout_s 必须是有限正数（仿真秒）")
+    if not math.isfinite(dwell) or dwell <= lift_dwell_time:
+        raise ValueError(f"--dwell_time 必须大于 LIFT_DWELL_TIME（{lift_dwell_time} s）")
+    if timeout < dwell:
+        raise ValueError(f"未成功重置时限 {timeout} s 小于成功保持时间 {dwell} s")
+    cfg.episode_length_s = timeout
+    # Install explicitly even if the selected training config disables time_out.
+    cfg.terminations.time_out = TerminationTermCfg(func=time_out, time_out=True)
+    cfg.terminations.lift_success = TerminationTermCfg(
+        func=LiftSuccess, time_out=False, params={
+            "lift_height_threshold": height, "dwell_time": dwell,
+            "lift_dwell_time": lift_dwell_time, "target_cfg": SceneEntityCfg("target"),
+        },
+    )
+
+
 def evaluate(args, app, stop_requested):
     # Simulator-dependent imports must follow AppLauncher.
     import gymnasium as gym
     import torch
     from rsl_rl.runners import OnPolicyRunner
-    from isaaclab.managers import SceneEntityCfg, TerminationTermCfg
     from isaaclab.utils.io import dump_yaml
     from isaaclab_rl.rsl_rl import RslRlVecEnvWrapper
     from isaaclab_tasks.utils import parse_env_cfg
 
     import eggtart_grasp.tasks  # noqa: F401
-    from eggtart_grasp.tasks.mobile_grasp.mdp.terminations import LiftSuccess
     from eggtart_grasp.tasks.mobile_grasp.mobile_grasp_env_cfg import (
         LIFT_HEIGHT_THRESHOLD, LIFT_DWELL_TIME, LIFT_SUCCESS_DWELL_TIME,
     )
@@ -78,19 +107,9 @@ def evaluate(args, app, stop_requested):
     cfg.events.target_approach_stage1 = None
     height = LIFT_HEIGHT_THRESHOLD if args.lift_height is None else args.lift_height
     dwell = LIFT_SUCCESS_DWELL_TIME if args.dwell_time is None else args.dwell_time
-    if dwell <= LIFT_DWELL_TIME:
-        raise ValueError(f"--dwell_time 必须大于 LIFT_DWELL_TIME（{LIFT_DWELL_TIME} s）")
-    if args.episode_length_s is not None:
-        cfg.episode_length_s = args.episode_length_s
-    if cfg.episode_length_s < dwell:
-        raise ValueError(f"回合时限 {cfg.episode_length_s} s 小于成功保持时间 {dwell} s")
-    # Install only on this evaluation config; training may intentionally disable
-    # success termination to continue rewarding holding/retraction.
-    cfg.terminations.lift_success = TerminationTermCfg(
-        func=LiftSuccess, time_out=False, params={
-            "lift_height_threshold": height, "dwell_time": dwell,
-            "lift_dwell_time": LIFT_DWELL_TIME, "target_cfg": SceneEntityCfg("target"),
-        },
+    configure_episode_termination(
+        cfg, height=height, dwell=dwell, lift_dwell_time=LIFT_DWELL_TIME,
+        timeout_s=args.episode_length_s,
     )
     target_params = cfg.events.reset_target.params
     locked_step = target_params[f"stage{args.curriculum_stage}_start_step"]
@@ -99,7 +118,9 @@ def evaluate(args, app, stop_requested):
     print(f"[EVAL] 当前任务配置；阶段 {args.curriculum_stage}；目标跟踪关闭；"
           f"动作={'随机采样' if args.stochastic else '确定性'}；观测噪声={args.observation_noise}", flush=True)
     print(f"[EVAL] 成功条件：物块世界高度 >= {height:.3f} m 连续 {dwell:.3f} s（仅按高度）；"
-          f"时限 {cfg.episode_length_s:.3f} s；{num_envs} 环境 / {args.num_episodes} 回合", flush=True)
+          f"{num_envs} 环境 / {args.num_episodes} 回合", flush=True)
+    print(f"[EVAL] 每个实例 {cfg.episode_length_s:.3f} 仿真秒内未成功即记为超时并自动重置；"
+          "成功当步即重置，其他实例继续运行", flush=True)
 
     env = gym.make(args.task, cfg=cfg)
     try:
@@ -132,6 +153,9 @@ def evaluate(args, app, stop_requested):
             "lift_height": height, "dwell_time": dwell,
             "effective_dwell_time": math.ceil(dwell / base_env.step_dt) * base_env.step_dt,
             "episode_length_s": cfg.episode_length_s, "step_dt": base_env.step_dt,
+            "success_timeout_s": cfg.episode_length_s,
+            "effective_timeout_s": base_env.max_episode_length * base_env.step_dt,
+            "timeout_clock": "per-episode simulation time",
             "env_config": str(env_config_path), "configuration_source": "current task configuration",
         }
         start = last_report = time.monotonic()
@@ -158,7 +182,8 @@ def evaluate(args, app, stop_requested):
                         rate = summary["success_rate"]
                         text_rate = f"{100 * rate:.2f}%" if rate is not None else "待首个完整回合"
                         print(f"[EVAL] {summary['completed_episodes']}/{args.num_episodes} 回合；"
-                              f"成功 {summary['successes']}；成功率 {text_rate}", flush=True)
+                              f"成功 {summary['successes']}；超时重置 {summary['outcomes']['time_out']}；"
+                              f"成功率 {text_rate}", flush=True)
                         last_report = now
         except KeyboardInterrupt:
             stop_reason = "interrupted"

@@ -19,6 +19,7 @@
       回放时恢复录制的世界坐标，不分别随机生成机器人或物块。
     - 不含初始状态的数据不能用于验证原轨迹；脚本会报错，避免误播随机场景。
     - 接触轨迹对物理参数敏感，修改环境配置后可能无法复现录制结果。
+    - 回放时限自动覆盖选中轨迹；训练成功/失败终止项关闭，完整播放后再切换轨迹。
 """
 
 import argparse
@@ -63,6 +64,31 @@ def _load_episode_indices(arg: str, num_episodes: int) -> list[int]:
     if idx < 0 or idx >= num_episodes:
         raise ValueError(f"episode {idx} 越界（共 {num_episodes} 条轨迹）")
     return [idx]
+
+
+def _configure_replay_terminations(env_cfg, max_episode_steps: int) -> None:
+    """Keep the final recorded state visible, then let the replay loop reset.
+
+    Training success/failure conditions must not teleport the scene partway
+    through an archived demonstration. Retain only a timeout beyond its end.
+    """
+    from isaaclab.envs.mdp import time_out
+    from isaaclab.managers import TerminationTermCfg
+
+    step_dt = env_cfg.sim.dt * env_cfg.decimation
+    previous_limit = env_cfg.episode_length_s
+    # time_out uses >=, so allow one extra step even for the longest episode.
+    env_cfg.episode_length_s = max(previous_limit, (max_episode_steps + 1) * step_dt)
+    disabled = []
+    for name, term in vars(env_cfg.terminations).items():
+        if name != "time_out" and isinstance(term, TerminationTermCfg):
+            setattr(env_cfg.terminations, name, None)
+            disabled.append(name)
+    env_cfg.terminations.time_out = TerminationTermCfg(func=time_out, time_out=True)
+    print(f"[回放] 最长选中轨迹 {max_episode_steps} 步（{max_episode_steps * step_dt:.3f} s）；"
+          f"回放时限 {previous_limit:.3f} -> {env_cfg.episode_length_s:.3f} s")
+    if disabled:
+        print(f"[回放] 已关闭训练终止项: {', '.join(disabled)}；每条录制轨迹完整播放后切换")
 
 
 def main() -> None:
@@ -146,6 +172,7 @@ def _replay(args_cli, simulation_app, act, ep_lens, ep_indices, init_states, lif
     env_cfg.sim.device = args_cli.device
     env_cfg.events.target_approach_stage1 = None
     env_cfg.events.randomize_target_velocity = None
+    _configure_replay_terminations(env_cfg, max(int(ep_lens[ep]) for ep in ep_indices))
 
     import gymnasium as gym
 
@@ -234,7 +261,12 @@ def _replay(args_cli, simulation_app, act, ep_lens, ep_indices, init_states, lif
                 a = torch.tensor(act[s + t], device=device).unsqueeze(0)
                 obs, _, terminated, truncated, _ = env.step(a)
                 if (terminated | truncated).any():
-                    raise RuntimeError(f"轨迹 {ep} 在第 {t + 1} 步提前重置；请检查回放和录制环境的终止条件")
+                    reasons = [name for name in base_env.termination_manager.active_terms
+                               if base_env.termination_manager.get_term(name).any()]
+                    raise RuntimeError(
+                        f"轨迹 {ep} 在第 {t + 1}/{e - s} 步意外重置，触发项: {reasons}；"
+                        f"回放时限为 {base_env.max_episode_length} 步"
+                    )
 
                 if (t % args_cli.frame_skip == 0) and args_cli.save_frames:
                     try:

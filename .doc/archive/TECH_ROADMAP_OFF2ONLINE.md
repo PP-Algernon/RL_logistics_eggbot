@@ -1,3 +1,5 @@
+> 已归档（2026-09-14）。原路径：`.doc/技术路线/TECH_ROADMAP_OFF2ONLINE.md`。本文保留当时方案、参数与实验记录，当前操作请见[文档索引](../README.md)和[训练指南](../TODO_BC_PPO_DAPG.md)。
+
 > 历史记录：当前保留 `Isaac-Mobile-Grasp-Eggtart-v0` 和 `Isaac-Mobile-Grasp-Eggtart-BCPPO-v0`，分别使用普通奖励课程和 `BCCurriculumCfg`。本文的旧配置与命令请以[训练清单](../TODO_BC_PPO_DAPG.md)为准。
 
 # Eggtart 移动抓取：从"纯 RL + 稠密奖励"转向"离线数据 + 稀疏奖励 RL"技术路线

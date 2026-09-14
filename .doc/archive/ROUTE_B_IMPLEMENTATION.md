@@ -1,3 +1,5 @@
+> 已归档（2026-09-14）。原路径：`.doc/ROUTE_B_IMPLEMENTATION.md`。本文保留当时方案、参数与实验记录，当前操作请见[文档索引](../README.md)和[训练指南](../TODO_BC_PPO_DAPG.md)。
+
 # 路线 B 实施指南：BC 预训练 + PPO 微调
 
 **状态**：✅ 实施完成
